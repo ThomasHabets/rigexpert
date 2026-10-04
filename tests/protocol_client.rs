@@ -31,6 +31,10 @@ fn crc_and_command_wire_layout() {
     assert_eq!(&saved[2..14], &p[1..13]);
 }
 #[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "These fixtures require exact equality for representable wire values; stable and nightly differ on linting assertions"
+)]
 fn both_formats_and_padding() {
     let settings = SweepSettings {
         samples: 3,
@@ -86,6 +90,10 @@ fn capabilities_and_memory_order() {
     assert!(assembler.push(&p, 50.0).is_err());
 }
 #[tokio::test]
+#[allow(
+    clippy::float_cmp,
+    reason = "These fixtures require exact equality for representable wire values; stable and nightly differ on linting assertions"
+)]
 async fn demo_round_trip_and_memory() {
     let mut a = Analyzer::demo().await.unwrap();
     assert_eq!(a.info().serial, "DEMO");

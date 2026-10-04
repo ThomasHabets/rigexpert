@@ -31,7 +31,7 @@ enum Command {
         #[arg(long)]
         load: Option<PathBuf>,
     },
-    /// Discover nearby RigExpert devices.
+    /// Discover nearby `RigExpert` devices.
     Scan {
         #[arg(long,default_value="5",value_parser=clap::value_parser!(u64).range(1..=60))]
         seconds: u64,
@@ -102,6 +102,11 @@ fn parse_positive(s: &str) -> std::result::Result<f64, String> {
     }
 }
 /// Accept Hz by default and explicit Hz/kHz/MHz/GHz suffixes.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Frequency is checked finite, integral and within 1..=650000000 before conversion"
+)]
 pub(crate) fn frequency(s: &str) -> std::result::Result<u64, String> {
     let input = s.trim().to_ascii_lowercase();
     let (number, multiplier) = if let Some(n) = input.strip_suffix("ghz") {

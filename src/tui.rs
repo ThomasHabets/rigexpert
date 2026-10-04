@@ -2,8 +2,9 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     prelude::*,
     widgets::{
+        Axis, Block, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Tabs,
+        Wrap,
         canvas::{Canvas, Line as CanvasLine, Points},
-        *,
     },
 };
 use rigexpert::{
@@ -12,6 +13,7 @@ use rigexpert::{
     analysis::{self, CableSettings, Tdr},
     files::{self, Session},
 };
+use std::fmt::Write as _;
 use std::{collections::VecDeque, io::IsTerminal, path::PathBuf, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -147,6 +149,10 @@ enum Modal {
     Rename(String),
     Help,
 }
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Connection, acquisition, file I/O and display toggles are independent state dimensions"
+)]
 struct App {
     session: Session,
     info: Option<DeviceInfo>,
@@ -236,11 +242,9 @@ impl App {
         if let Some(Ok(tdr)) = &self.tdr {
             self.tdr_cursor = self.tdr_cursor.min(tdr.points.len().saturating_sub(1));
         }
-        self.cursor = self.cursor.min(
-            self.sweep()
-                .map(|s| s.data.len().saturating_sub(1))
-                .unwrap_or(0),
-        );
+        self.cursor = self
+            .cursor
+            .min(self.sweep().map_or(0, |s| s.data.len().saturating_sub(1)));
     }
     fn acquisition_settings(&self) -> SweepSettings {
         if self.tab == 0 {
@@ -515,12 +519,12 @@ impl App {
             let result = tokio::task::spawn_blocking(move || match action {
                 FileAction::Load => files::load(&path, z0).map(Update::Loaded),
                 FileAction::Save => files::save_session(&path, &session, overwrite)
-                    .map(|_| Update::Saved(format!("Saved {}", path.display()))),
+                    .map(|()| Update::Saved(format!("Saved {}", path.display()))),
                 FileAction::Export => {
                     let sweep =
                         sweep.ok_or_else(|| Error::Invalid("select a sweep to export".into()))?;
                     files::export(&path, &sweep, overwrite)
-                        .map(|_| Update::Saved(format!("Exported {}", path.display())))
+                        .map(|()| Update::Saved(format!("Exported {}", path.display())))
                 }
             })
             .await;
@@ -533,6 +537,10 @@ impl App {
         });
     }
     /// Returns true when the user exits.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered discovery or UI dispatch stages together for review"
+    )]
     fn key(
         &mut self,
         key: KeyEvent,
@@ -562,7 +570,7 @@ impl App {
                 } => match key.code {
                     KeyCode::Tab | KeyCode::Down => *selected = (*selected + 1) % fields.len(),
                     KeyCode::BackTab | KeyCode::Up => {
-                        *selected = (*selected + fields.len() - 1) % fields.len()
+                        *selected = (*selected + fields.len() - 1) % fields.len();
                     }
                     KeyCode::Enter => match self.apply_fields(fields, *cable) {
                         Ok(()) => keep = false,
@@ -572,7 +580,7 @@ impl App {
                         fields[*selected].1.pop();
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        fields[*selected].1.clear()
+                        fields[*selected].1.clear();
                     }
                     KeyCode::Char(ch) => fields[*selected].1.push(ch),
                     _ => {}
@@ -588,7 +596,7 @@ impl App {
                         path.pop();
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        path.clear()
+                        path.clear();
                     }
                     KeyCode::Char(c) => path.push(c),
                     _ => {}
@@ -617,7 +625,7 @@ impl App {
                         name.pop();
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        name.clear()
+                        name.clear();
                     }
                     KeyCode::Char(c) => name.push(c),
                     _ => {}
@@ -653,29 +661,29 @@ impl App {
                 self.modal = Some(Modal::File {
                     action: FileAction::Save,
                     path: "session.json".into(),
-                })
+                });
             }
             KeyCode::Char('x') => {
                 self.modal = Some(Modal::File {
                     action: FileAction::Export,
                     path: "sweep.csv".into(),
-                })
+                });
             }
             KeyCode::Char('l') if !self.busy => {
                 self.modal = Some(Modal::File {
                     action: FileAction::Load,
                     path: String::new(),
-                })
+                });
             }
             KeyCode::Char('n') => {
                 self.modal = Some(Modal::Rename(
                     self.sweep().map(|s| s.name.clone()).unwrap_or_default(),
-                ))
+                ));
             }
             KeyCode::Char('m') => {
                 self.metric = (self.metric + 1) % if self.tab == 3 { 3 } else { 5 }
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => self.zoom = (self.zoom * 2).min(64),
+            KeyCode::Char('+' | '=') => self.zoom = (self.zoom * 2).min(64),
             KeyCode::Char('-') => self.zoom = (self.zoom / 2).max(1),
             KeyCode::Char('u') => self.feet = !self.feet,
             KeyCode::Char('b') => {
@@ -695,7 +703,7 @@ impl App {
                 self.short = Some(self.selected);
                 self.log("Selected short-terminated sweep");
             }
-            KeyCode::Char('a') | KeyCode::Char('d') if self.tab == 4 => {
+            KeyCode::Char('a' | 'd') if self.tab == 4 => {
                 if let Some(s) = self.sweep() {
                     match analysis::transform_sweep(
                         s,
@@ -800,11 +808,8 @@ impl App {
                     }
                 } else {
                     self.cursor = if right {
-                        (self.cursor + 1).min(
-                            self.sweep()
-                                .map(|s| s.data.len().saturating_sub(1))
-                                .unwrap_or(0),
-                        )
+                        (self.cursor + 1)
+                            .min(self.sweep().map_or(0, |s| s.data.len().saturating_sub(1)))
                     } else {
                         self.cursor.saturating_sub(1)
                     };
@@ -894,6 +899,11 @@ fn chart(
     frame.render_widget(chart, area);
 }
 impl App {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::float_cmp,
+        reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers; Exact equality identifies a zero-span axis or verifies exactly representable wire fixture values"
+    )]
     fn visible_bounds(&self, data: &[Sample]) -> [f64; 2] {
         if data.is_empty() {
             return [
@@ -911,6 +921,10 @@ impl App {
         let start = (center - width / 2.0).clamp(first, last - width);
         [start, start + width]
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered discovery or UI dispatch stages together for review"
+    )]
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         if area.width < 50 || area.height < 16 {
@@ -1019,7 +1033,7 @@ impl App {
         );
         frame.render_widget(Paragraph::new("Space start/stop · e settings · r reconnect · s save · x export · l load\nTab view · ←→ cursor · b compare · m metric · +/- zoom · ? help · q quit").style(Style::new().fg(Color::Gray)),regions[4]);
         if let Some(modal) = &self.modal {
-            self.draw_modal(frame, modal);
+            Self::draw_modal(frame, modal);
         }
     }
     fn sample_readout(&self) -> String {
@@ -1045,6 +1059,10 @@ impl App {
             Err(e) => e.to_string(),
         }
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers"
+    )]
     fn draw_live(&self, frame: &mut Frame, area: Rect) {
         let sample = self
             .progress
@@ -1066,11 +1084,9 @@ impl App {
                     number(m.magnitude),
                     number(m.phase_degrees),
                     m.inductance_h
-                        .map(|v| format!("{:.4} nH", v * 1e9))
-                        .unwrap_or_else(|| "—".into()),
+                        .map_or_else(|| "—".into(), |v| format!("{:.4} nH", v * 1e9)),
                     m.capacitance_f
-                        .map(|v| format!("{:.4} pF", v * 1e12))
-                        .unwrap_or_else(|| "—".into()),
+                        .map_or_else(|| "—".into(), |v| format!("{:.4} pF", v * 1e12)),
                     self.live_hz as f64 / 1e6,
                     self.repeat
                 ),
@@ -1204,13 +1220,13 @@ impl App {
                     let mut grid = Vec::new();
                     for r in [0.0, 0.2, 0.5, 1.0, 2.0, 5.0] {
                         for n in 0..360 {
-                            let a = n as f64 * std::f64::consts::PI / 180.0;
+                            let a = f64::from(n) * std::f64::consts::PI / 180.0;
                             grid.push((r / (r + 1.0) + a.cos() / (r + 1.0), a.sin() / (r + 1.0)));
                         }
                     }
                     for x in [-5.0f64, -2.0, -1.0, -0.5, -0.2, 0.2, 0.5, 1.0, 2.0, 5.0] {
                         for n in 0..720 {
-                            let a = n as f64 * std::f64::consts::PI / 360.0;
+                            let a = f64::from(n) * std::f64::consts::PI / 360.0;
                             let point = (1.0 + a.cos() / x.abs(), 1.0 / x + a.sin() / x.abs());
                             if point.0 * point.0 + point.1 * point.1 <= 1.002 {
                                 grid.push(point);
@@ -1250,70 +1266,71 @@ impl App {
     fn distance(&self, metres: f64) -> f64 {
         if self.feet { metres / 0.3048 } else { metres }
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "FFT indices are bounded by the transform size; fractional interpolation indices intentionally truncate"
+    )]
     fn draw_tdr(&self, frame: &mut Frame, area: Rect) {
-        match &self.tdr {
-            Some(Ok(tdr)) => {
-                let regions =
-                    Layout::vertical([Constraint::Min(3), Constraint::Length(5)]).split(area);
-                let label = if self.feet { "ft" } else { "m" };
-                let metric = self.metric % 3;
-                let series = vec![(
-                    "TDR".into(),
-                    tdr.points
-                        .iter()
-                        .filter_map(|p| {
-                            let y = match metric {
-                                0 => Some(p.impulse),
-                                1 => Some(p.step),
-                                _ => p.impedance_ohm,
-                            };
-                            y.filter(|y| y.is_finite())
-                                .map(|y| (self.distance(p.distance_m), y))
-                        })
-                        .collect(),
-                    Color::Cyan,
-                )];
-                let range = self.distance(tdr.range_m);
-                let width = range / self.zoom as f64;
-                let center = self.distance(tdr.points[self.tdr_cursor].distance_m);
-                let start = (center - width / 2.0).clamp(0.0, range - width);
-                chart(
-                    frame,
-                    regions[0],
-                    &format!(
-                        "TDR {} · distance ({label})",
-                        ["impulse", "step", "impedance"][metric]
-                    ),
-                    &series,
-                    [start, start + width],
-                    ["reflection", "reflection", "ohm"][metric],
-                );
-                let p = &tdr.points[self.tdr_cursor];
-                frame.render_widget(Paragraph::new(format!("Cursor {:.4} {label} · impulse {} · step {} · Z {} Ω\nResolution ≈ {:.3} {label} · range {:.3} {label} · VF {:.4}\nSpace acquires broadband data · g strongest reflection · m metric\n←→ cursor (Shift: faster) · +/- zoom · u metres/feet",self.distance(p.distance_m),number(p.impulse),number(p.step),p.impedance_ohm.map(number).unwrap_or_else(||"undefined".into()),self.distance(tdr.resolution_m),self.distance(tdr.range_m),tdr.velocity_factor)).block(block("Estimated TDR · DC extrapolation")),regions[1]);
-            }
-            _ => {
-                let reason = self
-                    .tdr
-                    .as_ref()
-                    .and_then(|t| t.as_ref().err())
-                    .map(String::as_str)
-                    .unwrap_or("No sweep selected");
-                frame.render_widget(Paragraph::new(format!("{reason}\n\nSpace acquires 100 kHz to device maximum.\nUse e in Cable to set velocity factor.\nTDR requires complete, low-start, uniform broadband data.")).wrap(Wrap { trim:true }).block(block("TDR")),area);
-            }
+        if let Some(Ok(tdr)) = &self.tdr {
+            let regions = Layout::vertical([Constraint::Min(3), Constraint::Length(5)]).split(area);
+            let label = if self.feet { "ft" } else { "m" };
+            let metric = self.metric % 3;
+            let series = vec![(
+                "TDR".into(),
+                tdr.points
+                    .iter()
+                    .filter_map(|p| {
+                        let y = match metric {
+                            0 => Some(p.impulse),
+                            1 => Some(p.step),
+                            _ => p.impedance_ohm,
+                        };
+                        y.filter(|y| y.is_finite())
+                            .map(|y| (self.distance(p.distance_m), y))
+                    })
+                    .collect(),
+                Color::Cyan,
+            )];
+            let range = self.distance(tdr.range_m);
+            let width = range / self.zoom as f64;
+            let center = self.distance(tdr.points[self.tdr_cursor].distance_m);
+            let start = (center - width / 2.0).clamp(0.0, range - width);
+            chart(
+                frame,
+                regions[0],
+                &format!(
+                    "TDR {} · distance ({label})",
+                    ["impulse", "step", "impedance"][metric]
+                ),
+                &series,
+                [start, start + width],
+                ["reflection", "reflection", "ohm"][metric],
+            );
+            let p = &tdr.points[self.tdr_cursor];
+            frame.render_widget(Paragraph::new(format!("Cursor {:.4} {label} · impulse {} · step {} · Z {} Ω\nResolution ≈ {:.3} {label} · range {:.3} {label} · VF {:.4}\nSpace acquires broadband data · g strongest reflection · m metric\n←→ cursor (Shift: faster) · +/- zoom · u metres/feet",self.distance(p.distance_m),number(p.impulse),number(p.step),p.impedance_ohm.map_or_else(||"undefined".into(), number),self.distance(tdr.resolution_m),self.distance(tdr.range_m),tdr.velocity_factor)).block(block("Estimated TDR · DC extrapolation")),regions[1]);
+        } else {
+            let reason = self
+                .tdr
+                .as_ref()
+                .and_then(|t| t.as_ref().err())
+                .map_or("No sweep selected", String::as_str);
+            frame.render_widget(Paragraph::new(format!("{reason}\n\nSpace acquires 100 kHz to device maximum.\nUse e in Cable to set velocity factor.\nTDR requires complete, low-start, uniform broadband data.")).wrap(Wrap { trim:true }).block(block("TDR")),area);
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered discovery or UI dispatch stages together for review"
+    )]
     fn draw_cable(&self, frame: &mut Frame, area: Rect) {
         let c = self.session.cable;
         let open_name = self
             .open
             .and_then(|i| self.session.sweeps.get(i))
-            .map(|s| s.name.as_str())
-            .unwrap_or("not selected");
+            .map_or("not selected", |s| s.name.as_str());
         let short_name = self
             .short
             .and_then(|i| self.session.sweeps.get(i))
-            .map(|s| s.name.as_str())
-            .unwrap_or("not selected");
+            .map_or("not selected", |s| s.name.as_str());
         let mut text = format!(
             "Cable: {} Ω · {:.3} m · VF {:.5}\nLoss: {} conductor + {} dielectric dB/m at {:.3} MHz\n\ne edit · a add cable · d remove cable (creates a new sweep)\no mark open sweep · k mark short sweep\nOpen: {open_name}\nShort: {short_name}\n",
             c.impedance_ohm,
@@ -1330,25 +1347,33 @@ impl App {
             match analysis::characteristic_impedance(o, s) {
                 Ok(z) => {
                     if let Some(z) = z.get(self.cursor.min(z.len().saturating_sub(1))) {
-                        text.push_str(&format!(
-                            "Estimated cable Z0: {} + j{} Ω\n",
+                        let _ = writeln!(
+                            &mut text,
+                            "Estimated cable Z0: {} + j{} Ω",
                             number(z.re),
                             number(z.im)
-                        ));
+                        );
                     }
                 }
-                Err(e) => text.push_str(&format!("{e}\n")),
+                Err(e) => {
+                    let _ = writeln!(&mut text, "{e}");
+                }
             }
         }
         if let Some(s) = self.sweep() {
             if let Some(v) = s.data.get(self.cursor) {
                 if self.open == Some(self.selected) || self.short == Some(self.selected) {
                     match analysis::cable_loss(v, c.impedance_ohm) {
-                        Ok(loss) => text.push_str(&format!(
-                            "One-way loss estimate at cursor: {} dB\n",
-                            number(loss)
-                        )),
-                        Err(e) => text.push_str(&format!("{e}\n")),
+                        Ok(loss) => {
+                            let _ = writeln!(
+                                &mut text,
+                                "One-way loss estimate at cursor: {} dB",
+                                number(loss)
+                            );
+                        }
+                        Err(e) => {
+                            let _ = writeln!(&mut text, "{e}");
+                        }
                     }
                 }
                 let short = analysis::stub_length(
@@ -1366,24 +1391,36 @@ impl App {
                     true,
                 );
                 if let (Ok(short), Ok(open)) = (short, open) {
-                    text.push_str(&format!("Stub target X {} Ω at {:.6} MHz\n  Short: {:.5} m · Open: {:.5} m (lossless)\n",self.target_x,v.frequency_hz/1e6,short,open));
+                    let _ = write!(
+                        &mut text,
+                        "Stub target X {} Ω at {:.6} MHz\n  Short: {:.5} m · Open: {:.5} m (lossless)\n",
+                        self.target_x,
+                        v.frequency_hz / 1e6,
+                        short,
+                        open
+                    );
                 }
             }
             let crossings = analysis::resonances(s);
-            text.push_str(&format!(
-                "X=0 resonances: {}\n",
+            let _ = writeln!(
+                &mut text,
+                "X=0 resonances: {}",
                 crossings
                     .iter()
                     .take(8)
                     .map(|f| format!("{:.6} MHz", f / 1e6))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ));
+            );
         }
         if let Some(Ok(tdr)) = &self.tdr
             && let Some(p) = tdr.points.get(self.tdr_cursor)
         {
-            text.push_str(&format!("\nSelected reflection: {:.4} m\nKnown length: {:.4} m; v estimates VF from TDR cursor\nSelect reflection in TDR with ←→ or g.",p.distance_m,self.known_length_m));
+            let _ = write!(
+                &mut text,
+                "\nSelected reflection: {:.4} m\nKnown length: {:.4} m; v estimates VF from TDR cursor\nSelect reflection in TDR with ←→ or g.",
+                p.distance_m, self.known_length_m
+            );
         } else {
             text.push_str("\nAcquire a broadband TDR sweep for cable length/VF.");
         }
@@ -1394,6 +1431,10 @@ impl App {
             area,
         );
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers"
+    )]
     fn draw_memory(&self, frame: &mut Frame, area: Rect) {
         let items = self
             .records
@@ -1423,7 +1464,7 @@ impl App {
             &mut state,
         );
     }
-    fn draw_modal(&self, frame: &mut Frame, modal: &Modal) {
+    fn draw_modal(frame: &mut Frame, modal: &Modal) {
         let area = frame.area();
         let width = area.width.saturating_sub(4).min(90);
         let height = area.height.saturating_sub(2).min(22);
@@ -1562,7 +1603,7 @@ pub async fn run(options: ConnectionOptions, demo: bool, load: Option<PathBuf>) 
             tokio::select! {
                 _ = interrupt.recv() => break,
                 _ = terminate.recv() => break,
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
         }
         Ok::<_, Error>(())
@@ -1657,7 +1698,7 @@ mod tests {
                         .buffer()
                         .content()
                         .iter()
-                        .map(|c| c.symbol())
+                        .map(ratatui::buffer::Cell::symbol)
                         .collect::<String>();
                     assert!(text.contains("Smith chart"));
                 }

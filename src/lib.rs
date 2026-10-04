@@ -1,4 +1,4 @@
-//! Async RigExpert BLE client, file formats, and one-port RF analysis.
+//! Async `RigExpert` BLE client, file formats, and one-port RF analysis.
 //!
 //! Connect using [`Analyzer::connect`], then acquire with [`Analyzer::sweep`].
 //! All frequencies in the library are Hz, impedances are ohms, distances metres.
@@ -84,6 +84,10 @@ impl Default for SweepSettings {
     }
 }
 impl SweepSettings {
+    ///
+    /// # Errors
+    /// Returns an error for frequencies outside device limits, an unsupported BLE grid, sample
+    /// count, or invalid impedance.
     pub fn validate(&self, info: &DeviceInfo) -> Result<()> {
         if self.start_hz < info.min_hz || self.stop_hz > info.max_hz || self.start_hz > self.stop_hz
         {
@@ -113,6 +117,11 @@ impl SweepSettings {
         }
         Ok(())
     }
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers"
+    )]
     pub fn frequency(&self, index: usize) -> f64 {
         self.start_hz as f64
             + (self.stop_hz - self.start_hz) as f64 * index as f64 / (self.samples - 1) as f64
@@ -125,9 +134,14 @@ pub struct Sample {
     pub x: f64,
 }
 impl Sample {
+    #[must_use]
     pub fn impedance(&self) -> num_complex::Complex64 {
         num_complex::Complex64::new(self.r, self.x)
     }
+    ///
+    /// # Errors
+    /// Returns an error for nonpositive or nonfinite frequency, negative or nonfinite
+    /// resistance, or nonfinite reactance.
     pub fn validate(&self) -> Result<()> {
         if !self.frequency_hz.is_finite()
             || self.frequency_hz <= 0.0
@@ -171,6 +185,14 @@ impl Sweep {
             device: None,
         }
     }
+    ///
+    /// # Errors
+    /// Returns an error for invalid settings, missing or excess samples, invalid impedances,
+    /// or unordered or out-of-range frequencies.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers"
+    )]
     pub fn validate(&self) -> Result<()> {
         if self.settings.start_hz == 0
             || self.settings.samples < 2

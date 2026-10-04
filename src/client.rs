@@ -15,12 +15,21 @@ pub struct Analyzer {
     pub operation_timeout: Duration,
 }
 impl Analyzer {
+    ///
+    /// # Errors
+    /// Returns an error if Bluetooth connection, service discovery, or analyzer identification fails.
     pub async fn connect(options: &ConnectionOptions) -> Result<Self> {
         Self::with_transport(Box::new(transport::BleTransport::connect(options).await?)).await
     }
+    ///
+    /// # Errors
+    /// Returns an error if initialization of the simulated analyzer fails.
     pub async fn demo() -> Result<Self> {
         Self::with_transport(Box::new(transport::DemoTransport::new())).await
     }
+    ///
+    /// # Errors
+    /// Returns an error if identity exchange fails or the device is not an AA-650.
     pub async fn with_transport(transport: Box<dyn Transport>) -> Result<Self> {
         let info = transport::default_info(transport.as_ref());
         let mut analyzer = Self {
@@ -35,6 +44,7 @@ impl Analyzer {
         }
         Ok(analyzer)
     }
+    #[must_use]
     pub fn info(&self) -> &DeviceInfo {
         &self.info
     }
@@ -83,6 +93,9 @@ impl Analyzer {
         Ok(())
     }
     /// Idle heartbeat; also provides a boundary after draining cancelled frames.
+    ///
+    /// # Errors
+    /// Returns an error on transport failure, malformed replies, or timeout.
     pub async fn ping(&mut self) -> Result<()> {
         self.transport
             .send(&protocol::command(protocol::PING))
@@ -98,16 +111,25 @@ impl Analyzer {
         .await
         .map_err(|_| Error::Timeout("ping response"))?
     }
+    ///
+    /// # Errors
+    /// Returns an error if the stop command cannot be sent.
     pub async fn cancel(&mut self) -> Result<()> {
         self.transport
             .send(&protocol::command(protocol::BREAK))
             .await
     }
+    ///
+    /// # Errors
+    /// Returns an error if stopping or disconnecting the transport fails.
     pub async fn disconnect(&mut self) -> Result<()> {
         let stop = self.cancel().await;
         let disconnect = self.transport.disconnect().await;
         disconnect.and(stop)
     }
+    ///
+    /// # Errors
+    /// Returns an error for invalid settings or an acquisition failure. Cancellation returns a partial sweep.
     pub async fn sweep(
         &mut self,
         settings: SweepSettings,
@@ -117,6 +139,10 @@ impl Analyzer {
         self.acquire(settings, None, "Measurement".into(), cancel, progress)
             .await
     }
+    ///
+    /// # Errors
+    /// Returns an error for invalid record settings or an acquisition failure. Cancellation
+    /// returns a partial sweep.
     pub async fn download(
         &mut self,
         record: &Record,
@@ -167,7 +193,7 @@ impl Analyzer {
                 .min(deadline.saturating_duration_since(Instant::now()));
             let response = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => break Some("cancelled".to_string()),
+                () = cancel.cancelled() => break Some("cancelled".to_string()),
                 value = timeout(wait,self.receive()) => value,
             };
             match response {
@@ -177,7 +203,7 @@ impl Analyzer {
                         settings.samples
                     ));
                 }
-                Ok(Err(e @ Error::Protocol(_))) | Ok(Err(e @ Error::Invalid(_))) => {
+                Ok(Err(e @ (Error::Protocol(_) | Error::Invalid(_)))) => {
                     corrupt += 1;
                     progress(Progress::Warning(e.to_string()));
                     if corrupt >= 20 {
@@ -232,6 +258,9 @@ impl Analyzer {
         }
         Ok(sweep)
     }
+    ///
+    /// # Errors
+    /// Returns an error for invalid impedance, malformed records, transport failure, cancellation, or timeout.
     pub async fn records(&mut self, z0: f64, cancel: &CancellationToken) -> Result<Vec<Record>> {
         if !z0.is_finite() || z0 <= 0.0 {
             return Err(Error::Invalid("invalid reference impedance".into()));
@@ -245,7 +274,7 @@ impl Analyzer {
         let deadline = Instant::now() + self.operation_timeout;
         let outcome = loop {
             let value = tokio::select! {
-                _ = cancel.cancelled() => break Err(Error::Invalid("memory listing cancelled".into())),
+                () = cancel.cancelled() => break Err(Error::Invalid("memory listing cancelled".into())),
                 value = timeout(self.idle_timeout.min(deadline.saturating_duration_since(Instant::now())),self.receive()) => value,
             };
             match value {

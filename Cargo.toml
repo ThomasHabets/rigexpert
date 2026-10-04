@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 description = "RigExpert AA-650 ZOOM BLE library and terminal analyzer"
+license = "MIT"
 
 [dependencies]
 async-trait = "0.1"

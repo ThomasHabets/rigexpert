@@ -1,5 +1,5 @@
-//! RigExpert binary GATT protocol. Independently implemented from the wire
-//! layouts in https://github.com/rigexpert/AntScope2/tree/master/analyzer.
+//! `RigExpert` binary GATT protocol. Independently implemented from the wire
+//! layouts in <https://github.com/rigexpert/AntScope2/tree/master/analyzer>.
 use crate::{DeviceInfo, Error, Record, Result, Sample, SweepSettings};
 pub const SERVICE: &str = "d973f2e0-b19e-11e2-9e96-0800200c9a66";
 pub const READ: &str = "706e4f15-3ee6-41c6-ba10-ca8abdcf3043";
@@ -14,6 +14,7 @@ pub const INFO: u8 = 0x9b;
 pub type Packet = [u8; 20];
 
 /// CRC-8: polynomial 0x07, initial value 0, no reflection or final xor.
+#[must_use]
 pub fn crc8(bytes: &[u8]) -> u8 {
     let mut crc = 0u8;
     for &byte in bytes {
@@ -28,15 +29,20 @@ pub fn crc8(bytes: &[u8]) -> u8 {
     }
     crc
 }
+#[must_use]
 pub fn seal(mut packet: Packet) -> Packet {
     packet[19] = crc8(&packet[..19]);
     packet
 }
+#[must_use]
 pub fn command(cmd: u8) -> Packet {
     let mut p = [0; 20];
     p[0] = cmd;
     seal(p)
 }
+///
+/// # Errors
+/// Returns an error unless the packet has exactly 20 bytes and a valid CRC.
 pub fn check(bytes: &[u8]) -> Result<Packet> {
     let p: Packet = bytes
         .try_into()
@@ -46,6 +52,9 @@ pub fn check(bytes: &[u8]) -> Result<Packet> {
     }
     Ok(p)
 }
+///
+/// # Errors
+/// Returns an error for too few samples, reversed endpoints, or values exceeding the wire format.
 pub fn measure(settings: &SweepSettings, slot: Option<u8>) -> Result<Packet> {
     if settings.samples < 2 {
         return Err(Error::Invalid("at least two samples are required".into()));
@@ -90,13 +99,22 @@ fn string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes.split(|b| *b == 0).next().unwrap_or_default()).into_owned()
 }
 /// Apply a full-information field. Unknown fields are ignored for compatibility.
+///
+/// # Errors
+/// Returns an error for invalid capabilities or truncated serial or firmware fields.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Capability frequencies intentionally truncate fractional Hz and saturate before clipping to the AA-650 range"
+)]
 pub fn apply_info(p: &Packet, info: &mut DeviceInfo) -> Result<u8> {
     match p[1] {
         0 => info.name = string(&p[2..19]),
         2 => {
-            let scale = 10f64.powi(6 - (p[10] as i8) as i32);
-            let min = u32_at(p, 2) as f64 * scale;
-            let max = u32_at(p, 6) as f64 * scale;
+            let scale = 10f64.powi(6 - i32::from(i8::from_le_bytes([p[10]])));
+            let min = f64::from(u32_at(p, 2)) * scale;
+            let max = f64::from(u32_at(p, 6)) * scale;
             let intervals = u16_at(p, 11) as usize;
             if !min.is_finite() || min < 1.0 || max < min || max > u64::MAX as f64 || intervals == 0
             {
@@ -129,14 +147,25 @@ pub fn apply_info(p: &Packet, info: &mut DeviceInfo) -> Result<u8> {
     Ok(p[1])
 }
 /// Packed signed impedance: 13-bit mantissa, 2-bit decimal exponent, sign bit.
+#[must_use]
 pub fn unpack(value: u16) -> f64 {
-    let magnitude = (value & 0x1fff) as f64 * 123.0 / 10f64.powi(((value >> 13) & 3) as i32 + 2);
+    let magnitude =
+        f64::from(value & 0x1fff) * 123.0 / 10f64.powi(i32::from((value >> 13) & 3) + 2);
     if value & 0x8000 != 0 {
         -magnitude
     } else {
         magnitude
     }
 }
+///
+/// # Errors
+/// Returns an error for invalid sample indices, impedances, or frequencies outside the requested grid.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers"
+)]
 pub fn samples(p: &Packet, packed: bool, settings: &SweepSettings) -> Result<Vec<(usize, Sample)>> {
     let mut out = Vec::new();
     if packed {
@@ -145,7 +174,8 @@ pub fn samples(p: &Packet, packed: bool, settings: &SweepSettings) -> Result<Vec
             return Err(Error::Protocol("negative sample index".into()));
         }
         // Odd block IDs in newer firmware identify the same even-index block.
-        let first = (id as usize) & !1;
+        let first =
+            usize::try_from(id).map_err(|_| Error::Protocol("negative sample index".into()))? & !1;
         for i in 0..4 {
             let index = first + i;
             if index >= settings.samples {
@@ -169,8 +199,8 @@ pub fn samples(p: &Packet, packed: bool, settings: &SweepSettings) -> Result<Vec
         let frequency_hz = u64_at(p, 1) as f64;
         let s = Sample {
             frequency_hz,
-            r: f32::from_le_bytes(p[9..13].try_into().unwrap()) as f64,
-            x: f32::from_le_bytes(p[13..17].try_into().unwrap()) as f64,
+            r: f64::from(f32::from_bits(u32_at(p, 9))),
+            x: f64::from(f32::from_bits(u32_at(p, 13))),
         };
         s.validate()?;
         let span = (settings.stop_hz - settings.start_hz) as f64;
@@ -200,6 +230,9 @@ pub struct RecordAssembler {
 }
 impl RecordAssembler {
     /// Returns an assembled record; 0xff signals list completion to the caller.
+    ///
+    /// # Errors
+    /// Returns an error for invalid record data or fields received out of order.
     pub fn push(&mut self, p: &Packet, z0: f64) -> Result<Option<Record>> {
         match p[1] {
             0 => {
@@ -224,7 +257,10 @@ impl RecordAssembler {
                 self.stage = 1;
             }
             1 if self.stage == 1 => {
-                let record = self.current.as_mut().unwrap();
+                let record = self
+                    .current
+                    .as_mut()
+                    .ok_or_else(|| Error::Protocol("missing memory record".into()))?;
                 record.settings.samples = u16_at(p, 2) as usize;
                 if record.settings.samples < 2 {
                     return Err(Error::Protocol("invalid record point count".into()));
@@ -233,7 +269,10 @@ impl RecordAssembler {
                 self.stage = 2;
             }
             2 if self.stage == 2 => {
-                let mut record = self.current.take().unwrap();
+                let mut record = self
+                    .current
+                    .take()
+                    .ok_or_else(|| Error::Protocol("missing memory record".into()))?;
                 record.name.push_str(&string(&p[2..19]));
                 self.stage = 0;
                 return Ok(Some(record));

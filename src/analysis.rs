@@ -13,6 +13,9 @@ fn positive(value: f64, name: &str) -> Result<()> {
         Ok(())
     }
 }
+///
+/// # Errors
+/// Returns an error for an invalid sample or nonpositive, nonfinite reference impedance.
 pub fn reflection(sample: &Sample, z0: f64) -> Result<Complex64> {
     sample.validate()?;
     positive(z0, "Z0")?;
@@ -29,6 +32,9 @@ pub struct Metrics {
     pub inductance_h: Option<f64>,
     pub capacitance_f: Option<f64>,
 }
+///
+/// # Errors
+/// Returns an error for an invalid sample or reference impedance.
 pub fn metrics(sample: &Sample, z0: f64) -> Result<Metrics> {
     let gamma = reflection(sample, z0)?;
     let rho = gamma.norm();
@@ -82,6 +88,9 @@ impl Default for CableSettings {
     }
 }
 impl CableSettings {
+    ///
+    /// # Errors
+    /// Returns an error for invalid cable impedance, length, velocity factor, frequency, or losses.
     pub fn validate(&self) -> Result<()> {
         positive(self.impedance_ohm, "cable impedance")?;
         positive(self.reference_hz, "reference frequency")?;
@@ -99,11 +108,15 @@ impl CableSettings {
         }
         Ok(())
     }
+    #[must_use]
     pub fn attenuation_db_per_m(&self, f: f64) -> f64 {
         let ratio = f / self.reference_hz;
         self.conductor_loss_db_per_m * ratio.sqrt() + self.dielectric_loss_db_per_m * ratio
     }
 }
+///
+/// # Errors
+/// Returns an error unless the velocity factor is finite and in (0, 1].
 pub fn validate_vf(vf: f64) -> Result<()> {
     positive(vf, "velocity factor")?;
     if vf > 1.0 {
@@ -112,6 +125,9 @@ pub fn validate_vf(vf: f64) -> Result<()> {
     Ok(())
 }
 /// Add a cable in front of a load, or remove it to estimate the far-end load.
+///
+/// # Errors
+/// Returns an error for invalid inputs or a singular or nonphysical transformed impedance.
 pub fn transform(sample: &Sample, cable: &CableSettings, remove: bool) -> Result<Sample> {
     sample.validate()?;
     cable.validate()?;
@@ -131,6 +147,9 @@ pub fn transform(sample: &Sample, cable: &CableSettings, remove: bool) -> Result
     })?;
     Ok(result)
 }
+///
+/// # Errors
+/// Returns an error for an invalid sweep, cable settings, or transformed sample.
 pub fn transform_sweep(sweep: &Sweep, cable: &CableSettings, remove: bool) -> Result<Sweep> {
     sweep.validate()?;
     let mut result = sweep.clone();
@@ -147,6 +166,9 @@ pub fn transform_sweep(sweep: &Sweep, cable: &CableSettings, remove: bool) -> Re
     Ok(result)
 }
 /// One-way loss estimate for an ideal open/short termination and matched cable.
+///
+/// # Errors
+/// Returns an error for invalid inputs or reflection magnitude outside (0, 1].
 pub fn cable_loss(sample: &Sample, z0: f64) -> Result<f64> {
     let rho = reflection(sample, z0)?.norm();
     if rho <= 0.0 || rho > 1.0 + 1e-9 {
@@ -157,6 +179,9 @@ pub fn cable_loss(sample: &Sample, z0: f64) -> Result<f64> {
     Ok(-10.0 * rho.min(1.0).log10())
 }
 /// Characteristic impedance from corresponding ideal open and short measurements.
+///
+/// # Errors
+/// Returns an error for incomplete or mismatched sweeps, invalid samples, or singular impedance.
 pub fn characteristic_impedance(open: &Sweep, short: &Sweep) -> Result<Vec<Complex64>> {
     open.validate()?;
     short.validate()?;
@@ -187,6 +212,9 @@ pub fn characteristic_impedance(open: &Sweep, short: &Sweep) -> Result<Vec<Compl
         .collect()
 }
 /// Shortest nonnegative lossless stub length for a target series reactance.
+///
+/// # Errors
+/// Returns an error for invalid frequency, impedance, velocity factor, or reactance.
 pub fn stub_length(frequency_hz: f64, reactance: f64, z0: f64, vf: f64, open: bool) -> Result<f64> {
     positive(frequency_hz, "frequency")?;
     positive(z0, "Z0")?;
@@ -205,6 +233,7 @@ pub fn stub_length(frequency_hz: f64, reactance: f64, z0: f64, vf: f64, open: bo
     Ok(phase * SPEED_OF_LIGHT * vf / (2.0 * PI * frequency_hz))
 }
 /// Linear interpolation of measured X=0 crossings, including exact zeros.
+#[must_use]
 pub fn resonances(sweep: &Sweep) -> Vec<f64> {
     let mut result: Vec<f64> = Vec::new();
     for pair in sweep.data.windows(2) {
@@ -248,6 +277,7 @@ pub struct Tdr {
 }
 impl Tdr {
     /// Strongest reflection after a minimum distance; the user may choose another cursor.
+    #[must_use]
     pub fn peak(&self, min_distance: f64) -> Option<&TdrPoint> {
         self.points
             .iter()
@@ -255,11 +285,17 @@ impl Tdr {
             .max_by(|a, b| a.impulse.abs().total_cmp(&b.impulse.abs()))
     }
 }
+///
+/// # Errors
+/// Returns an error for invalid delay or velocity factor.
 pub fn length_from_delay(delay_seconds: f64, vf: f64) -> Result<f64> {
     positive(delay_seconds, "round-trip delay")?;
     validate_vf(vf)?;
     Ok(SPEED_OF_LIGHT * vf * delay_seconds / 2.0)
 }
+///
+/// # Errors
+/// Returns an error for invalid length or delay, or a calculated factor outside (0, 1].
 pub fn velocity_factor(length_m: f64, delay_seconds: f64) -> Result<f64> {
     positive(length_m, "known length")?;
     positive(delay_seconds, "round-trip delay")?;
@@ -270,6 +306,16 @@ pub fn velocity_factor(length_m: f64, delay_seconds: f64) -> Result<f64> {
 
 /// Low-pass, windowed TDR. The missing DC value is estimated from the lowest
 /// measured reflection. A low-start, uniform, complete sweep is required.
+///
+/// # Errors
+/// Returns an error for invalid velocity factor, incomplete or nonuniform data, unsuitable
+/// frequency coverage, or an oversized transform.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "FFT indices are bounded by the transform size; fractional interpolation indices intentionally truncate"
+)]
 pub fn tdr(sweep: &Sweep, vf: f64) -> Result<Tdr> {
     validate_vf(vf)?;
     sweep.validate()?;
@@ -296,7 +342,16 @@ pub fn tdr(sweep: &Sweep, vf: f64) -> Result<Tdr> {
         .iter()
         .map(|s| reflection(s, sweep.settings.z0))
         .collect::<Result<_>>()?;
-    let bins = (data.last().unwrap().frequency_hz / df).floor() as usize;
+    let last_frequency = data
+        .last()
+        .ok_or_else(|| Error::Invalid("TDR requires samples".into()))?
+        .frequency_hz;
+    let bin_count = (last_frequency / df).floor();
+    // Bound the float before conversion and FFT size arithmetic.
+    if bin_count > 65_535.0 {
+        return Err(Error::Invalid("TDR transform too large".into()));
+    }
+    let bins = bin_count as usize;
     let n = (2 * (bins + 1)).next_power_of_two() * 8;
     if n > 1_048_576 {
         return Err(Error::Invalid("TDR transform too large".into()));
@@ -343,7 +398,7 @@ pub fn tdr(sweep: &Sweep, vf: f64) -> Result<Tdr> {
         .collect();
     Ok(Tdr {
         points,
-        resolution_m: SPEED_OF_LIGHT * vf / (2.0 * data.last().unwrap().frequency_hz),
+        resolution_m: SPEED_OF_LIGHT * vf / (2.0 * last_frequency),
         range_m: distance_step * (n / 2) as f64,
         velocity_factor: vf,
     })

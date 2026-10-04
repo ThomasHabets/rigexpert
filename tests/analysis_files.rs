@@ -35,6 +35,10 @@ fn sweep_from_gamma(gamma: impl Fn(f64) -> Complex64) -> Sweep {
     s
 }
 #[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "These fixtures require exact equality for representable wire values; stable and nightly differ on linting assertions"
+)]
 fn loads_and_singular_metrics() {
     let m = analysis::metrics(&sample(50.0, 0.0), 50.0).unwrap();
     assert_eq!(m.swr, 1.0);
@@ -196,6 +200,10 @@ fn session_csv_touchstone_round_trips_and_overwrite() {
     );
 }
 #[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "These fixtures require exact equality for representable wire values; stable and nightly differ on linting assertions"
+)]
 fn external_touchstone_units_formats_and_invalid_files() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("external.s1p");

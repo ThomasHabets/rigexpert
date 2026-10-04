@@ -1,4 +1,4 @@
-//! Direct fixed-channel ATT client for peers whose request timing BlueZ rejects.
+//! Direct fixed-channel ATT client for peers whose request timing `BlueZ` rejects.
 //! The reader answers peer requests immediately and keeps notifications queued
 //! independently of caller cancellation. No daemon or dependency patches needed.
 use crate::{
@@ -52,7 +52,7 @@ fn u16_at(bytes: &[u8], offset: usize) -> Result<u16> {
 fn uuid(bytes: &[u8]) -> Result<Uuid> {
     match bytes.len() {
         2 => Ok(Uuid::from_u128(
-            ((u16_at(bytes, 0)? as u128) << 96) | 0x00001000800000805f9b34fb,
+            (u128::from(u16_at(bytes, 0)?) << 96) | 0x0000_1000_8000_0080_5f9b_34fb,
         )),
         16 => {
             let mut bytes: [u8; 16] = bytes.try_into().unwrap();
@@ -226,6 +226,10 @@ impl DirectTransport {
         .await
         .map_err(|_| Error::Timeout("ATT response"))?
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered discovery or UI dispatch stages together for review"
+    )]
     async fn discover(&mut self) -> Result<()> {
         let wanted = Uuid::parse_str(protocol::SERVICE).unwrap();
         let mut start = 1u16;
@@ -303,8 +307,7 @@ impl DirectTransport {
         self.read_handle = characteristics[index].value;
         let descriptor_end = characteristics
             .get(index + 1)
-            .map(|c| c.declaration - 1)
-            .unwrap_or(range.1);
+            .map_or(range.1, |c| c.declaration - 1);
         let write = characteristics
             .iter()
             .find(|c| c.uuid == write_uuid && c.properties & 0x0c != 0)

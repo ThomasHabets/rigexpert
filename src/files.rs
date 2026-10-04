@@ -4,6 +4,7 @@ use crate::{
     analysis::{self, CableSettings},
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::{io::Write, path::Path};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -16,11 +17,14 @@ impl Default for Session {
         Self {
             version: 1,
             sweeps: Vec::new(),
-            cable: Default::default(),
+            cable: CableSettings::default(),
         }
     }
 }
 impl Session {
+    ///
+    /// # Errors
+    /// Returns an error for unsupported session versions or invalid cable settings or sweeps.
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
             return Err(Error::Invalid(format!(
@@ -99,10 +103,17 @@ fn write_file(path: &Path, data: &[u8], overwrite: bool) -> Result<()> {
     }
     outcome
 }
+///
+/// # Errors
+/// Returns an error for invalid session data, serialization failure, an existing path without
+/// overwrite, or an I/O failure.
 pub fn save_session(path: &Path, session: &Session, overwrite: bool) -> Result<()> {
     session.validate()?;
     write_file(path, &serde_json::to_vec_pretty(session)?, overwrite)
 }
+///
+/// # Errors
+/// Returns an error for unreadable, oversized, malformed, or invalid session files.
 pub fn load_session(path: &Path) -> Result<Session> {
     let s: Session = serde_json::from_str(&read_text(path)?)?;
     s.validate()?;
@@ -114,6 +125,10 @@ fn read_text(path: &Path) -> Result<String> {
     }
     Ok(std::fs::read_to_string(path)?)
 }
+///
+/// # Errors
+/// Returns an error for invalid sweep data, serialization failure, an existing path without
+/// overwrite, or an I/O failure.
 pub fn export_csv(path: &Path, sweep: &Sweep, overwrite: bool) -> Result<()> {
     sweep.validate()?;
     let mut text = format!(
@@ -121,10 +136,14 @@ pub fn export_csv(path: &Path, sweep: &Sweep, overwrite: bool) -> Result<()> {
         serde_json::to_string(&Metadata::from_sweep(sweep))?
     );
     for s in &sweep.data {
-        text.push_str(&format!("{:.9},{:.12},{:.12}\n", s.frequency_hz, s.r, s.x));
+        let _ = writeln!(&mut text, "{:.9},{:.12},{:.12}", s.frequency_hz, s.r, s.x);
     }
     write_file(path, text.as_bytes(), overwrite)
 }
+///
+/// # Errors
+/// Returns an error for invalid sweep data or reflection, serialization failure, an existing
+/// path without overwrite, or an I/O failure.
 pub fn export_touchstone(path: &Path, sweep: &Sweep, overwrite: bool) -> Result<()> {
     sweep.validate()?;
     let mut text = format!(
@@ -134,13 +153,15 @@ pub fn export_touchstone(path: &Path, sweep: &Sweep, overwrite: bool) -> Result<
     );
     for s in &sweep.data {
         let g = analysis::reflection(s, sweep.settings.z0)?;
-        text.push_str(&format!(
-            "{:.9} {:.16} {:.16}\n",
-            s.frequency_hz, g.re, g.im
-        ));
+        let _ = writeln!(&mut text, "{:.9} {:.16} {:.16}", s.frequency_hz, g.re, g.im);
     }
     write_file(path, text.as_bytes(), overwrite)
 }
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Imported frequency endpoints are rounded to whole Hz; sweep validation checks their grid"
+)]
 fn imported(path: &Path, data: Vec<Sample>, z0: f64, metadata: Option<Metadata>) -> Result<Sweep> {
     if data.len() < 2 && metadata.is_none() {
         return Err(Error::Invalid(
@@ -181,6 +202,9 @@ fn numbers(line: &str, separator: Option<char>) -> Result<Vec<f64>> {
         })
         .collect()
 }
+///
+/// # Errors
+/// Returns an error for unreadable, oversized, malformed, or invalid CSV data.
 pub fn import_csv(path: &Path, z0: f64) -> Result<Sweep> {
     let mut metadata = None;
     let mut data = Vec::new();
@@ -189,7 +213,7 @@ pub fn import_csv(path: &Path, z0: f64) -> Result<Sweep> {
         if let Some(m) = line.strip_prefix("# rigexpert ") {
             metadata = Some(serde_json::from_str(m)?);
         } else if line.is_empty() || line.starts_with('#') || line == "frequency_hz,r_ohm,x_ohm" {
-            continue;
+            // Skip comments and the CSV header.
         } else {
             let n = numbers(line, Some(','))?;
             if n.len() != 3 {
@@ -207,6 +231,9 @@ pub fn import_csv(path: &Path, z0: f64) -> Result<Sweep> {
     }
     imported(path, data, z0, metadata)
 }
+///
+/// # Errors
+/// Returns an error for unreadable, oversized, unsupported, malformed, or invalid Touchstone data.
 pub fn import_touchstone(path: &Path) -> Result<Sweep> {
     let mut metadata = None;
     let mut data = Vec::new();
@@ -248,7 +275,7 @@ pub fn import_touchstone(path: &Path) -> Result<Sweep> {
                 "GHZ" => 1e9,
                 _ => return Err(Error::Invalid("unknown Touchstone frequency unit".into())),
             };
-            format = words[2].clone();
+            format.clone_from(&words[2]);
             if !["RI", "MA", "DB"].contains(&format.as_str()) {
                 return Err(Error::Invalid("unknown Touchstone format".into()));
             }
@@ -294,6 +321,9 @@ pub fn import_touchstone(path: &Path) -> Result<Sweep> {
     }
     imported(path, data, z0, metadata)
 }
+///
+/// # Errors
+/// Returns an error for an unsupported extension or an unreadable or invalid input file.
 pub fn load(path: &Path, z0: f64) -> Result<Session> {
     let extension = path
         .extension()
@@ -313,6 +343,10 @@ pub fn load(path: &Path, z0: f64) -> Result<Session> {
         _ => Err(Error::Invalid("use .json, .csv, or .s1p files".into())),
     }
 }
+///
+/// # Errors
+/// Returns an error for an unsupported extension, invalid data, an existing path without
+/// overwrite, or an I/O failure.
 pub fn export(path: &Path, sweep: &Sweep, overwrite: bool) -> Result<()> {
     match path
         .extension()

@@ -1,4 +1,4 @@
-//! Linux BlueZ transport and deterministic simulated analyzer.
+//! Linux `BlueZ` transport and deterministic simulated analyzer.
 use crate::{
     DEFAULT_ADDRESS, DeviceInfo, Error, Result,
     protocol::{self, Packet},
@@ -59,6 +59,9 @@ pub struct BleTransport {
     inner: Box<dyn Transport>,
 }
 impl BleTransport {
+    ///
+    /// # Errors
+    /// Returns an error if neither direct ATT nor the `BlueZ` GATT connection succeeds.
     pub async fn connect(options: &ConnectionOptions) -> Result<Self> {
         match crate::att::DirectTransport::connect(options).await {
             Ok(transport) => Ok(Self {
@@ -129,6 +132,9 @@ pub(crate) fn discovery_filter(address: Option<bluer::Address>) -> DiscoveryFilt
         ..Default::default()
     }
 }
+///
+/// # Errors
+/// Returns an error if the adapter is unavailable or powered off, discovery fails, or its deadline expires.
 pub async fn scan(adapter_name: Option<&str>, duration: Duration) -> Result<Vec<DiscoveredDevice>> {
     timeout(duration + Duration::from_secs(5), async {
         let session = bluer::Session::new().await?;
@@ -372,6 +378,7 @@ impl Default for DemoTransport {
     }
 }
 impl DemoTransport {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
@@ -433,6 +440,12 @@ impl Transport for DemoTransport {
     fn address(&self) -> String {
         "demo".into()
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "Simulated wire fixtures use bounded indices and intentionally round to the protocol float/integer widths"
+    )]
     async fn send(&mut self, packet: &Packet) -> Result<()> {
         if self.closed {
             return Err(Error::Disconnected);
@@ -445,10 +458,12 @@ impl Transport for DemoTransport {
             protocol::LIST => self.records(),
             protocol::FRX | protocol::DATA => {
                 let offset = if p[0] == protocol::DATA { 2 } else { 1 };
-                let center =
-                    u32::from_le_bytes(p[offset..offset + 4].try_into().unwrap()) as u64 * 1000;
-                let span =
-                    u32::from_le_bytes(p[offset + 4..offset + 8].try_into().unwrap()) as u64 * 1000;
+                let center = u64::from(u32::from_le_bytes(
+                    p[offset..offset + 4].try_into().unwrap(),
+                )) * 1000;
+                let span = u64::from(u32::from_le_bytes(
+                    p[offset + 4..offset + 8].try_into().unwrap(),
+                )) * 1000;
                 let intervals =
                     u32::from_le_bytes(p[offset + 8..offset + 12].try_into().unwrap()) as usize;
                 if intervals == 0 || intervals > 500 {
