@@ -1,0 +1,24 @@
+[package]
+name = "rigexpert"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "RigExpert AA-650 ZOOM BLE library and terminal analyzer"
+
+[dependencies]
+async-trait = "0.1"
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
+clap = { version = "4.6", features = ["derive"] }
+futures = "0.3"
+num-complex = "0.4"
+ratatui = "0.30"
+rustfft = "6.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
