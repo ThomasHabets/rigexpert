@@ -16,7 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Install nightly
+    - name: apt update
+      run: sudo apt update
+    - name: apt install
+      run: sudo apt install build-essential pkg-config libdbus-1-dev
+    - name: Install rust nightly
       run: rustup install nightly
     - name: Rustup install nightly clippy
       run: rustup component add --toolchain nightly clippy
