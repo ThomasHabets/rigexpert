@@ -38,6 +38,7 @@ only when you press Space.
 | --- | --- |
 | Tab / Shift-Tab | Switch between Live, Sweeps, Smith, TDR, Cable, Memory |
 | Space | Start measurement, or cancel the current operation |
+| Shift+B | Choose an amateur band, with separate regional entries when limits differ |
 | e | Edit measurement settings; in Cable, edit cable inputs |
 | p | Toggle repeated acquisition |
 | Up / Down | Select a local sweep, or a record in Memory |
@@ -60,6 +61,21 @@ only when you press Space.
 | u | Switch TDR distance display between metres and feet |
 | ? | Help |
 | q / Ctrl-C | Stop, disconnect, restore the terminal, and exit |
+
+Press **Shift+B**, use arrows or Page Up/Down to choose a band, and press Enter
+to set its sweep range. This switches to Sweeps and keeps your sample count and
+reference impedance; **Space** starts the measurement. Esc cancels the picker.
+The presets cover 2200 m through 70 cm within the AA-650's range, with shared
+Region 1 and Region 2 entries when their limits match, and separate entries
+when they differ. National limits may differ.
+The picker shows the band limits and actual sweep limits: fractional-kHz edges
+and odd-kHz spans round outward to the analyzer's whole-kHz center/span grid.
+
+Presets follow the IARU [Region 1 HF](https://www.iaru-r1.org/wp-content/uploads/2021/06/hf_r1_bandplan.pdf),
+[Region 1 VHF](https://www.iaru-r1.org/wp-content/uploads/2020/12/VHF-Bandplan.pdf),
+[Region 1 UHF](https://www.iaru-r1.org/wp-content/uploads/2021/03/UHF-Bandplan.pdf), and
+[Region 2](https://www.iaru-r2.org/wp-content/uploads/2020/02/IARU-Region-2-Band-plan.pdf)
+band plans.
 
 In dialogs, Tab or arrows select a field, Ctrl-U clears its contents, Enter
 applies, and Esc cancels. Frequency fields accept `145.5MHz`, `100kHz`, or plain

@@ -1,3 +1,4 @@
+mod bands;
 mod tui;
 use clap::{Args, Parser, Subcommand};
 use rigexpert::{

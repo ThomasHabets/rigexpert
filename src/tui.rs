@@ -1,3 +1,4 @@
+use crate::bands::{self, BANDS};
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     prelude::*,
@@ -133,6 +134,9 @@ enum FileAction {
     Export,
 }
 enum Modal {
+    Bands {
+        selected: usize,
+    },
     Settings {
         fields: Vec<(String, String)>,
         selected: usize,
@@ -164,6 +168,7 @@ struct App {
     cursor: usize,
     tdr_cursor: usize,
     settings: SweepSettings,
+    band_selected: usize,
     live_hz: u64,
     repeat: bool,
     busy: bool,
@@ -203,6 +208,13 @@ impl App {
             cursor: 0,
             tdr_cursor: 0,
             settings,
+            band_selected: BANDS
+                .iter()
+                .position(|band| {
+                    let preset = band.settings(settings);
+                    preset.start_hz == settings.start_hz && preset.stop_hz == settings.stop_hz
+                })
+                .unwrap_or(0),
             live_hz: 145_500_000,
             repeat: false,
             busy: false,
@@ -245,6 +257,22 @@ impl App {
         self.cursor = self
             .cursor
             .min(self.sweep().map_or(0, |s| s.data.len().saturating_sub(1)));
+    }
+    fn apply_band(&mut self, selected: usize) -> Result<()> {
+        let band = BANDS[selected];
+        let settings = band.settings(self.settings);
+        settings.validate(&self.info.clone().unwrap_or_default())?;
+        self.settings = settings;
+        self.band_selected = selected;
+        self.live_hz = settings.start_hz.midpoint(settings.stop_hz) / 1000 * 1000;
+        self.tab = 1;
+        self.zoom = 1;
+        self.log(format!(
+            "{} · Sweep {} · Space starts.",
+            band.label(),
+            bands::range(settings.start_hz, settings.stop_hz)
+        ));
+        Ok(())
     }
     fn acquisition_settings(&self) -> SweepSettings {
         if self.tab == 0 {
@@ -560,6 +588,21 @@ impl App {
             }
             let mut keep = true;
             match &mut modal {
+                Modal::Bands { selected } => match key.code {
+                    KeyCode::Down | KeyCode::Tab => *selected = (*selected + 1) % BANDS.len(),
+                    KeyCode::Up | KeyCode::BackTab => {
+                        *selected = (*selected + BANDS.len() - 1) % BANDS.len();
+                    }
+                    KeyCode::Home => *selected = 0,
+                    KeyCode::End => *selected = BANDS.len() - 1,
+                    KeyCode::PageDown => *selected = (*selected + 10).min(BANDS.len() - 1),
+                    KeyCode::PageUp => *selected = selected.saturating_sub(10),
+                    KeyCode::Enter => match self.apply_band(*selected) {
+                        Ok(()) => keep = false,
+                        Err(error) => self.log(error.to_string()),
+                    },
+                    _ => {}
+                },
                 Modal::Help => {
                     keep = false;
                 }
@@ -639,6 +682,15 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('B') => {
+                if self.busy {
+                    self.log("Stop the measurement with Space before changing bands.");
+                } else {
+                    self.modal = Some(Modal::Bands {
+                        selected: self.band_selected,
+                    });
+                }
+            }
             KeyCode::Tab => {
                 self.tab = (self.tab + 1) % TABS.len();
             }
@@ -1031,7 +1083,7 @@ impl App {
                 .block(block("Status")),
             regions[3],
         );
-        frame.render_widget(Paragraph::new("Space start/stop · e settings · r reconnect · s save · x export · l load\nTab view · ←→ cursor · b compare · m metric · +/- zoom · ? help · q quit").style(Style::new().fg(Color::Gray)),regions[4]);
+        frame.render_widget(Paragraph::new("Space start/stop · B bands · e settings · r reconnect · s save · x export · l load\nTab view · ←→ cursor · b compare · m metric · +/- zoom · ? help · q quit").style(Style::new().fg(Color::Gray)),regions[4]);
         if let Some(modal) = &self.modal {
             Self::draw_modal(frame, modal);
         }
@@ -1464,6 +1516,26 @@ impl App {
             &mut state,
         );
     }
+    fn draw_band_picker(frame: &mut Frame, rect: Rect, selected: usize) {
+        let border = block("Amateur bands · Shift+B");
+        let inner = border.inner(rect);
+        frame.render_widget(border, rect);
+        let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(inner);
+        let items = BANDS.iter().map(|band| ListItem::new(band.label()));
+        let mut state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_style(Style::new().fg(Color::Black).bg(Color::Cyan))
+                .highlight_symbol("› "),
+            areas[0],
+            &mut state,
+        );
+        let settings = BANDS[selected].settings(SweepSettings::default());
+        frame.render_widget(Paragraph::new(format!(
+            "Sweep: {}\n↑↓/PgUp/PgDn choose · Enter apply · Esc cancel\nRegional presets; national band limits may differ.",
+            bands::range(settings.start_hz, settings.stop_hz)
+        )), areas[1]);
+    }
     fn draw_modal(frame: &mut Frame, modal: &Modal) {
         let area = frame.area();
         let width = area.width.saturating_sub(4).min(90);
@@ -1476,12 +1548,17 @@ impl App {
         );
         frame.render_widget(Clear, rect);
         let (title, lines) = match modal {
+            Modal::Bands { selected } => {
+                Self::draw_band_picker(frame, rect, *selected);
+                return;
+            }
             Modal::Help => (
                 "Help",
                 vec![
                     "Space starts/stops measurements; p toggles repetition.".into(),
                     "Tab / Shift-Tab change view; ↑↓ choose sweeps or memory.".into(),
                     "←→ move frequency/TDR cursor; +/- zoom; m changes metric.".into(),
+                    "B selects a band (Region 1/2); Enter applies; Space starts.".into(),
                     "e edits settings; Ctrl-U clears a field; Enter applies.".into(),
                     "b toggles comparison (up to three overlays); n renames.".into(),
                     "s saves a JSON session; x exports .csv/.s1p/.json.".into(),
@@ -1634,6 +1711,88 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
     #[test]
+    fn band_picker_applies_regional_ranges_only_on_confirmation() {
+        let (commands, mut work) = mpsc::channel(8);
+        let (events, _) = mpsc::channel(8);
+        let mut app = App::new(Session::default());
+        app.info = Some(DeviceInfo::default());
+        app.connecting = false;
+        app.settings.samples = 101;
+        app.settings.z0 = 75.0;
+        let original = app.settings;
+        app.tab = 3;
+        app.key(key(KeyCode::Char('B')), &commands, &events);
+        app.key(key(KeyCode::Up), &commands, &events);
+        assert_eq!(app.settings, original);
+        app.key(key(KeyCode::Esc), &commands, &events);
+        assert!(app.modal.is_none());
+        assert_eq!(app.settings, original);
+        for (region, stop_hz) in [
+            (bands::Regions::One, 146_000_000),
+            (bands::Regions::Two, 148_000_000),
+        ] {
+            let selected = BANDS
+                .iter()
+                .position(|band| band.name == "2 m" && band.region == region)
+                .unwrap();
+            app.modal = Some(Modal::Bands { selected });
+            app.key(key(KeyCode::Enter), &commands, &events);
+            assert!(app.modal.is_none());
+            assert_eq!(
+                app.settings,
+                SweepSettings {
+                    start_hz: 144_000_000,
+                    stop_hz,
+                    ..original
+                }
+            );
+            assert_eq!(app.tab, 1);
+            assert!(!app.busy);
+            assert!(work.try_recv().is_err());
+            app.key(key(KeyCode::Char('B')), &commands, &events);
+            assert!(
+                matches!(app.modal, Some(Modal::Bands { selected: index }) if index == selected)
+            );
+            app.key(key(KeyCode::Esc), &commands, &events);
+        }
+        app.key(key(KeyCode::Char(' ')), &commands, &events);
+        assert!(
+            matches!(work.try_recv().unwrap(), Work::Acquire(settings, _) if settings == app.settings)
+        );
+        app.key(key(KeyCode::Char('B')), &commands, &events);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn band_picker_navigation_wraps_and_rejects_unsupported_ranges() {
+        let (commands, _) = mpsc::channel(8);
+        let (events, _) = mpsc::channel(8);
+        let mut app = App::new(Session::default());
+        app.modal = Some(Modal::Bands { selected: 0 });
+        app.key(key(KeyCode::Up), &commands, &events);
+        assert!(
+            matches!(app.modal, Some(Modal::Bands { selected }) if selected == BANDS.len() - 1)
+        );
+        app.key(key(KeyCode::Down), &commands, &events);
+        assert!(matches!(app.modal, Some(Modal::Bands { selected: 0 })));
+        app.key(key(KeyCode::PageDown), &commands, &events);
+        assert!(matches!(app.modal, Some(Modal::Bands { selected: 10 })));
+        app.key(key(KeyCode::PageUp), &commands, &events);
+        assert!(matches!(app.modal, Some(Modal::Bands { selected: 0 })));
+        app.key(key(KeyCode::End), &commands, &events);
+        app.info = Some(DeviceInfo {
+            max_hz: 200_000_000,
+            ..Default::default()
+        });
+        let original = app.settings;
+        app.key(key(KeyCode::Enter), &commands, &events);
+        assert_eq!(app.settings, original);
+        assert!(app.modal.is_some());
+        app.key(key(KeyCode::Home), &commands, &events);
+        assert!(matches!(app.modal, Some(Modal::Bands { selected: 0 })));
+    }
+
+    #[test]
     fn controls_and_repeat_keep_acquisition_settings() {
         let (commands, mut work) = mpsc::channel(8);
         let (events, _) = mpsc::channel(8);
@@ -1702,6 +1861,21 @@ mod tests {
                         .collect::<String>();
                     assert!(text.contains("Smith chart"));
                 }
+            }
+            app.modal = Some(Modal::Bands {
+                selected: BANDS.len() - 1,
+            });
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            if width >= 50 {
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                assert!(text.contains("70 cm"));
+                assert!(text.contains("420–450 MHz"));
             }
             app.modal = Some(Modal::Help);
             terminal.draw(|frame| app.draw(frame)).unwrap();
