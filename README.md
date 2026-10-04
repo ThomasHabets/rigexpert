@@ -41,7 +41,7 @@ only when you press Space.
 | Shift+B | Choose an amateur band, with separate regional entries when limits differ |
 | e | Edit measurement settings; in Cable, edit cable inputs |
 | p | Toggle repeated acquisition |
-| Up / Down | Select a local sweep, or a record in Memory |
+| Up / Down, k / j | Select a local sweep, or a record in Memory; also navigate the band picker |
 | Left / Right | Move frequency or TDR cursor; Sweeps shows a white vertical cursor line |
 | Shift-Left / Shift-Right | Move the TDR cursor faster |
 | + / - | Zoom around the selected cursor |
@@ -54,7 +54,7 @@ only when you press Space.
 | r | Reconnect without automatically resuming measurement |
 | f | In Memory, refresh the record list |
 | Enter | In Memory, download selected record |
-| o / k | Mark selected sweep as open / short for cable analysis |
+| o / Shift+K | Mark selected sweep as open / short for cable analysis |
 | a / d | In Cable, add / remove a cable section into a new sweep |
 | g | In TDR or Cable, select the strongest reflection beyond one resolution cell |
 | v | In Cable, estimate velocity factor from known length and TDR cursor |
@@ -148,7 +148,7 @@ Step-response impedance is an estimate; singular values are marked undefined.
 ### Cable loss and impedance
 
 Measure the cable with an open far end, select that sweep and press `o`. Repeat
-with a short and press `k`. The Cable tab estimates characteristic impedance
+with a short and press `Shift+K`. The Cable tab estimates characteristic impedance
 from `sqrt(Zopen * Zshort)` when both sweeps are complete and use the same grid.
 Select either labelled sweep to show its one-way loss estimate at the cursor:
 `loss_dB = -10 log10(|reflection|)`. These assume ideal terminations and a cable

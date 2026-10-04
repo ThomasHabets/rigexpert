@@ -612,6 +612,19 @@ impl App {
             self.cancel.cancel();
             return true;
         }
+        let key =
+            if key.modifiers.is_empty() && matches!(self.modal, None | Some(Modal::Bands { .. })) {
+                KeyEvent {
+                    code: match key.code {
+                        KeyCode::Char('j') => KeyCode::Down,
+                        KeyCode::Char('k') => KeyCode::Up,
+                        code => code,
+                    },
+                    ..key
+                }
+            } else {
+                key
+            };
         if let Some(mut modal) = self.modal.take() {
             if key.code == KeyCode::Esc {
                 return false;
@@ -781,7 +794,7 @@ impl App {
                 self.open = Some(self.selected);
                 self.log("Selected open-terminated sweep");
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('K') => {
                 self.short = Some(self.selected);
                 self.log("Selected short-terminated sweep");
             }
@@ -1143,7 +1156,7 @@ impl App {
             });
         frame.render_stateful_widget(
             List::new(items)
-                .block(block("Saved sweeps ↑↓"))
+                .block(block("Saved sweeps ↑↓/jk"))
                 .highlight_style(Style::new().bg(Color::DarkGray))
                 .highlight_symbol("› "),
             content[0],
@@ -1472,7 +1485,7 @@ impl App {
             .and_then(|i| self.session.sweeps.get(i))
             .map_or("not selected", |s| s.name.as_str());
         let mut text = format!(
-            "Cable: {} Ω · {:.3} m · VF {:.5}\nLoss: {} conductor + {} dielectric dB/m at {:.3} MHz\n\ne edit · a add cable · d remove cable (creates a new sweep)\no mark open sweep · k mark short sweep\nOpen: {open_name}\nShort: {short_name}\n",
+            "Cable: {} Ω · {:.3} m · VF {:.5}\nLoss: {} conductor + {} dielectric dB/m at {:.3} MHz\n\ne edit · a add cable · d remove cable (creates a new sweep)\no mark open sweep · K mark short sweep\nOpen: {open_name}\nShort: {short_name}\n",
             c.impedance_ohm,
             c.length_m,
             c.velocity_factor,
@@ -1620,7 +1633,7 @@ impl App {
         );
         let settings = BANDS[selected].settings(SweepSettings::default());
         frame.render_widget(Paragraph::new(format!(
-            "Sweep: {}\n↑↓/PgUp/PgDn choose · Enter apply · Esc cancel\nRegional presets; national band limits may differ.",
+            "Sweep: {}\n↑↓/jk/PgUp/PgDn choose · Enter apply · Esc cancel\nRegional presets; national band limits may differ.",
             bands::range(settings.start_hz, settings.stop_hz)
         )), areas[1]);
     }
@@ -1644,7 +1657,7 @@ impl App {
                 "Help",
                 vec![
                     "Space starts/stops measurements; p toggles repetition.".into(),
-                    "Tab / Shift-Tab change view; ↑↓ choose sweeps or memory.".into(),
+                    "Tab / Shift-Tab change view; ↑↓/jk choose sweeps or memory.".into(),
                     "←→ move frequency/TDR cursor; +/- zoom; m changes metric.".into(),
                     "B selects a band (Region 1/2); Enter applies; Space starts.".into(),
                     "e edits settings; Ctrl-U clears a field; Enter applies.".into(),
@@ -1652,7 +1665,7 @@ impl App {
                     "s saves a JSON session; x exports .csv/.s1p/.json.".into(),
                     "l loads a file; u switches metres/feet in TDR.".into(),
                     "Memory: f lists records; Enter downloads selected slot.".into(),
-                    "Cable: o marks open sweep; k marks short sweep.".into(),
+                    "Cable: o marks open sweep; Shift+K marks short sweep.".into(),
                     "a adds cable; d removes cable; e edits cable inputs.".into(),
                     "TDR: g selects strongest reflection; Shift-arrows move faster.".into(),
                     "Cable: v estimates VF from known length and TDR cursor.".into(),
@@ -1849,6 +1862,88 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    fn vim_list_keys_navigate_without_marking_a_short_reference() {
+        let mut app = App::new(Session {
+            sweeps: (0..3)
+                .map(|_| Sweep::new("Test", SweepSettings::default()))
+                .collect(),
+            ..Default::default()
+        });
+        app.records = (0..3)
+            .map(|slot| Record {
+                slot,
+                name: "Test".into(),
+                settings: SweepSettings::default(),
+            })
+            .collect();
+        let (commands, _) = mpsc::channel(8);
+        let (events, _) = mpsc::channel(8);
+        for tab in 0..6 {
+            app.tab = tab;
+            app.selected = 0;
+            app.memory_selected = 0;
+            for (ch, expected) in [('k', 0), ('j', 1), ('j', 2), ('j', 2), ('k', 1)] {
+                app.key(key(KeyCode::Char(ch)), &commands, &events);
+                assert_eq!(
+                    if tab == 5 {
+                        app.memory_selected
+                    } else {
+                        app.selected
+                    },
+                    expected
+                );
+                assert!(app.short.is_none());
+            }
+        }
+        app.modal = Some(Modal::Bands { selected: 0 });
+        app.key(key(KeyCode::Char('k')), &commands, &events);
+        assert!(
+            matches!(app.modal, Some(Modal::Bands { selected }) if selected == BANDS.len() - 1)
+        );
+        app.key(key(KeyCode::Char('j')), &commands, &events);
+        assert!(matches!(app.modal, Some(Modal::Bands { selected: 0 })));
+        app.key(key(KeyCode::Esc), &commands, &events);
+        app.key(
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            &commands,
+            &events,
+        );
+        assert_eq!(app.short, Some(app.selected));
+    }
+
+    #[test]
+    fn vim_list_keys_remain_text_in_editing_dialogs() {
+        let (commands, _) = mpsc::channel(8);
+        let (events, _) = mpsc::channel(8);
+        let mut app = App::new(Session::default());
+        app.settings_modal(false);
+        let settings = app.modal.take().unwrap();
+        for modal in [
+            Modal::Rename(String::new()),
+            Modal::File {
+                action: FileAction::Load,
+                path: String::new(),
+            },
+            settings,
+        ] {
+            app.modal = Some(modal);
+            for ch in ['j', 'k'] {
+                app.key(key(KeyCode::Char(ch)), &commands, &events);
+            }
+            match app.modal.as_ref().unwrap() {
+                Modal::Rename(text) | Modal::File { path: text, .. } => assert_eq!(text, "jk"),
+                Modal::Settings {
+                    fields, selected, ..
+                } => {
+                    assert_eq!(*selected, 0);
+                    assert!(fields[0].1.ends_with("jk"));
+                }
+                _ => panic!("editing dialog changed"),
+            }
+        }
+    }
+
     #[test]
     fn sweep_cursor_moves_on_the_graph_for_every_metric_and_zoom() {
         let mut sweep = Sweep::new("Cursor test", SweepSettings::default());
