@@ -584,20 +584,19 @@ impl App {
         } else {
             vec![
                 (
-                    "Start / live frequency".into(),
-                    format!(
-                        "{}Hz",
-                        if self.tab == 0 {
-                            self.live_hz
-                        } else {
-                            self.settings.start_hz
-                        }
-                    ),
+                    if self.tab == 0 {
+                        "Live frequency (MHz)"
+                    } else {
+                        "Start (MHz)"
+                    }
+                    .into(),
+                    bands::frequency(if self.tab == 0 {
+                        self.live_hz
+                    } else {
+                        self.settings.start_hz
+                    }),
                 ),
-                (
-                    "Stop frequency".into(),
-                    format!("{}Hz", self.settings.stop_hz),
-                ),
+                ("Stop (MHz)".into(), bands::frequency(self.settings.stop_hz)),
                 ("Samples".into(), self.settings.samples.to_string()),
                 ("Reference Z0 (ohm)".into(), self.settings.z0.to_string()),
                 ("Repeat (true/false)".into(), self.repeat.to_string()),
@@ -638,8 +637,12 @@ impl App {
             self.known_length_m = known_length;
             self.recompute();
         } else {
-            let start = crate::frequency(&fields[0].1).map_err(Error::Invalid)?;
-            let stop = crate::frequency(&fields[1].1).map_err(Error::Invalid)?;
+            let frequency = |i: usize| {
+                crate::frequency(&format!("{}MHz", fields[i].1.trim()))
+                    .map_err(|error| Error::Invalid(format!("{}: {error}", fields[i].0)))
+            };
+            let start = frequency(0)?;
+            let stop = frequency(1)?;
             let samples = fields[2]
                 .1
                 .parse()
@@ -2078,6 +2081,45 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    fn settings_frequencies_display_and_parse_plain_mhz() {
+        let mut app = App::new(Session::default());
+        for (start, stop, start_hz, stop_hz) in [
+            ("144", "146", 144_000_000, 146_000_000),
+            ("145.5", "145.502", 145_500_000, 145_502_000),
+            ("0.1", "0.102", 100_000, 102_000),
+        ] {
+            app.settings_modal(false);
+            let Some(Modal::Settings { mut fields, .. }) = app.modal.take() else {
+                panic!("settings dialog missing");
+            };
+            assert_eq!(fields[0].0, "Start (MHz)");
+            assert_eq!(fields[1].0, "Stop (MHz)");
+            fields[0].1 = start.into();
+            fields[1].1 = stop.into();
+            app.apply_fields(&fields, false).unwrap();
+            assert_eq!(app.settings.start_hz, start_hz);
+            assert_eq!(app.settings.stop_hz, stop_hz);
+            app.settings_modal(false);
+            let Some(Modal::Settings { fields, .. }) = app.modal.take() else {
+                panic!("settings dialog missing");
+            };
+            assert_eq!(fields[0].1, start);
+            assert_eq!(fields[1].1, stop);
+            app.apply_fields(&fields, false).unwrap();
+        }
+        app.tab = 0;
+        app.live_hz = 145_500_000;
+        app.settings_modal(false);
+        let Some(Modal::Settings { fields, .. }) = app.modal.take() else {
+            panic!("settings dialog missing");
+        };
+        assert_eq!(fields[0].0, "Live frequency (MHz)");
+        assert_eq!(fields[0].1, "145.5");
+        app.apply_fields(&fields, false).unwrap();
+        assert_eq!(app.live_hz, 145_500_000);
+    }
+
     #[test]
     fn new_sweep_switches_range_before_samples_and_overlays_previous_trace() {
         let old_settings = SweepSettings {

@@ -81,8 +81,9 @@ Presets follow the IARU [Region 1 HF](https://www.iaru-r1.org/wp-content/uploads
 band plans.
 
 In dialogs, Tab or arrows select a field, Ctrl-U clears its contents, Enter
-applies, and Esc cancels. Frequency fields accept `145.5MHz`, `100kHz`, or plain
-Hz. Overwriting an existing file requires `y` confirmation. File operations run
+applies, and Esc cancels. Start, stop, and live frequency fields use MHz: enter
+`144`, `145.5`, or `0.1` without a unit suffix. Overwriting an existing file
+requires `y` confirmation. File operations run
 outside the device task. For best visibility use a terminal of at least 80×24;
 50×16 is the minimum layout.
 

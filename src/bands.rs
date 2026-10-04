@@ -57,7 +57,7 @@ impl Band {
         }
     }
 }
-fn frequency(hz: u64) -> String {
+pub(super) fn frequency(hz: u64) -> String {
     let value = format!("{}.{:06}", hz / 1_000_000, hz % 1_000_000);
     value.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
