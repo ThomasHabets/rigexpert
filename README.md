@@ -42,7 +42,7 @@ only when you press Space.
 | e | Edit measurement settings; in Cable, edit cable inputs |
 | p | Toggle repeated acquisition |
 | Up / Down | Select a local sweep, or a record in Memory |
-| Left / Right | Move frequency or TDR cursor |
+| Left / Right | Move frequency or TDR cursor; Sweeps shows a white vertical cursor line |
 | Shift-Left / Shift-Right | Move the TDR cursor faster |
 | + / - | Zoom around the selected cursor |
 | m | Cycle SWR, R/X, return loss, impedance magnitude, phase; in TDR: impulse/step/impedance |

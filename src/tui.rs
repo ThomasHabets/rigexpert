@@ -953,8 +953,9 @@ fn chart(
     series: &[PlotSeries],
     xbounds: [f64; 2],
     ylabel: &str,
+    cursor_x: Option<f64>,
 ) {
-    let y_axis = if ylabel == "SWR" {
+    let (y_axis, ybounds) = if ylabel == "SWR" {
         // Axis labels are evenly spaced, just like the transformed tick positions.
         let labels = if area.height >= 16 {
             vec!["1", "1.2", "1.5", "2", "3", "5", "10"]
@@ -963,11 +964,14 @@ fn chart(
         } else {
             vec!["1", "10"]
         };
-        Axis::default().bounds([0.0, 6.0]).labels(labels)
+        (Axis::default().labels(labels), [0.0, 6.0])
     } else {
         auto_y_axis(series, xbounds)
     };
-    let datasets = series
+    let cursor_points = cursor_x
+        .filter(|x| x.is_finite() && *x >= xbounds[0] && *x <= xbounds[1])
+        .map(|x| [(x, ybounds[0]), (x, ybounds[1])]);
+    let mut datasets = series
         .iter()
         .map(|(name, points, color)| {
             Dataset::default()
@@ -978,6 +982,15 @@ fn chart(
                 .style(Style::new().fg(*color))
         })
         .collect::<Vec<_>>();
+    if let Some(points) = &cursor_points {
+        datasets.push(
+            Dataset::default()
+                .data(points)
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(Color::White)),
+        );
+    }
     let chart = Chart::new(datasets)
         .block(block(title))
         .x_axis(
@@ -989,13 +1002,14 @@ fn chart(
         )
         .y_axis(
             y_axis
+                .bounds(ybounds)
                 .title(ylabel.to_string())
                 .style(Style::new().fg(Color::Gray)),
         );
     frame.render_widget(chart, area);
 }
 
-fn auto_y_axis(series: &[PlotSeries], xbounds: [f64; 2]) -> Axis<'static> {
+fn auto_y_axis(series: &[PlotSeries], xbounds: [f64; 2]) -> (Axis<'static>, [f64; 2]) {
     let ys: Vec<_> = series
         .iter()
         .flat_map(|(_, points, _)| points.iter())
@@ -1011,9 +1025,10 @@ fn auto_y_axis(series: &[PlotSeries], xbounds: [f64; 2]) -> Axis<'static> {
     let pad = ((ymax - ymin) * 0.1).max(0.1);
     ymin -= pad;
     ymax += pad;
-    Axis::default()
-        .bounds([ymin, ymax])
-        .labels([number(ymin), number(ymax)])
+    (
+        Axis::default().labels([number(ymin), number(ymax)]),
+        [ymin, ymax],
+    )
 }
 impl App {
     #[expect(
@@ -1294,6 +1309,9 @@ impl App {
             } else {
                 labels[self.metric]
             },
+            self.sweep()
+                .and_then(|s| s.data.get(self.cursor))
+                .map(|s| s.frequency_hz / 1e6),
         );
         frame.render_widget(
             Paragraph::new(self.sample_readout())
@@ -1426,6 +1444,7 @@ impl App {
                 &series,
                 [start, start + width],
                 ["reflection", "reflection", "ohm"][metric],
+                None,
             );
             let p = &tdr.points[self.tdr_cursor];
             frame.render_widget(Paragraph::new(format!("Cursor {:.4} {label} · impulse {} · step {} · Z {} Ω\nResolution ≈ {:.3} {label} · range {:.3} {label} · VF {:.4}\nSpace acquires broadband data · g strongest reflection · m metric\n←→ cursor (Shift: faster) · +/- zoom · u metres/feet",self.distance(p.distance_m),number(p.impulse),number(p.step),p.impedance_ohm.map_or_else(||"undefined".into(), number),self.distance(tdr.resolution_m),self.distance(tdr.range_m),tdr.velocity_factor)).block(block("Estimated TDR · DC extrapolation")),regions[1]);
@@ -1805,6 +1824,7 @@ mod tests {
                         &[("Trace".into(), points.clone(), Color::Cyan)],
                         [1.0, 2.0],
                         "SWR",
+                        None,
                     );
                 })
                 .unwrap();
@@ -1829,6 +1849,65 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    fn sweep_cursor_moves_on_the_graph_for_every_metric_and_zoom() {
+        let mut sweep = Sweep::new("Cursor test", SweepSettings::default());
+        sweep.data = [144e6, 145e6, 146e6]
+            .into_iter()
+            .map(|frequency_hz| Sample {
+                frequency_hz,
+                r: 70.0,
+                x: 10.0,
+            })
+            .collect();
+        let mut app = App::new(Session {
+            sweeps: vec![sweep],
+            ..Default::default()
+        });
+        app.tab = 1;
+        let (commands, _) = mpsc::channel(8);
+        let (events, _) = mpsc::channel(8);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for metric in 0..5 {
+            app.metric = metric;
+            for zoom in [1, 2] {
+                app.zoom = zoom;
+                app.cursor = 0;
+                let mut columns = Vec::new();
+                let mut middle_frame = None;
+                for _ in 0..3 {
+                    terminal
+                        .draw(|frame| app.draw_sweeps(frame, frame.area()))
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let column = (0..80)
+                        .find(|x| {
+                            (1..18)
+                                .filter(|y| {
+                                    let cell = &buffer[(*x, *y)];
+                                    cell.fg == Color::White && cell.symbol() != " "
+                                })
+                                .count()
+                                >= 8
+                        })
+                        .expect("visible vertical cursor");
+                    columns.push(column);
+                    if app.cursor == 1 {
+                        middle_frame = Some(buffer.clone());
+                    }
+                    app.key(key(KeyCode::Right), &commands, &events);
+                }
+                assert!(columns[0] < columns[1] && columns[1] < columns[2]);
+                app.key(key(KeyCode::Left), &commands, &events);
+                assert_eq!(app.cursor, 1);
+                terminal
+                    .draw(|frame| app.draw_sweeps(frame, frame.area()))
+                    .unwrap();
+                assert_eq!(Some(terminal.backend().buffer()), middle_frame.as_ref());
+            }
+        }
+    }
+
     #[test]
     fn band_picker_applies_regional_ranges_only_on_confirmation() {
         let (commands, mut work) = mpsc::channel(8);
