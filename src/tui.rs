@@ -459,6 +459,7 @@ impl App {
         {
             self.busy = true;
             self.active_settings = Some(settings);
+            self.zoom = 1;
             self.log(format!("Acquiring {} samples", settings.samples));
         }
     }
@@ -485,6 +486,7 @@ impl App {
             Update::Progress(Progress::Warning(text)) => self.log(text),
             Update::Acquired(mut sweep) => {
                 self.busy = false;
+                let active_settings = self.active_settings.take();
                 let complete = sweep.status == SweepStatus::Complete;
                 let is_live = sweep.settings.start_hz == sweep.settings.stop_hz;
                 if sweep.name == "Measurement" {
@@ -516,7 +518,7 @@ impl App {
                 if self.repeat
                     && complete
                     && !self.cancel.is_cancelled()
-                    && let Some(settings) = self.active_settings
+                    && let Some(settings) = active_settings
                 {
                     self.start_settings(settings, commands);
                 }
@@ -529,6 +531,7 @@ impl App {
             }
             Update::Failed(text) => {
                 self.busy = false;
+                self.active_settings = None;
                 self.connecting = false;
                 self.repeat = false;
                 self.log(text);
@@ -536,6 +539,7 @@ impl App {
             Update::Disconnected(text) => {
                 self.info = None;
                 self.busy = false;
+                self.active_settings = None;
                 self.connecting = false;
                 self.repeat = false;
                 self.log(text);
@@ -986,6 +990,8 @@ impl App {
                         .is_ok()
                     {
                         self.busy = true;
+                        self.active_settings = Some(record.settings);
+                        self.zoom = 1;
                     }
                 }
             }
@@ -1171,6 +1177,21 @@ impl App {
         reason = "RF frequencies and sample indices are represented approximately as f64; validated grid indices round back to integers; Exact equality identifies a zero-span axis or verifies exactly representable wire fixture values"
     )]
     fn visible_bounds(&self, data: &[Sample]) -> [f64; 2] {
+        if let Some(settings) = self.active_settings {
+            let first = settings.start_hz as f64 / 1e6;
+            let last = settings.stop_hz as f64 / 1e6;
+            if first == last {
+                return [first - 0.001, last + 0.001];
+            }
+            let width = (last - first) / self.zoom as f64;
+            let center = data
+                .get(self.cursor)
+                .map(|s| s.frequency_hz / 1e6)
+                .filter(|x| *x >= first && *x <= last)
+                .unwrap_or(first.midpoint(last));
+            let start = (center - width / 2.0).clamp(first, last - width);
+            return [start, start + width];
+        }
         if data.is_empty() {
             return [
                 self.settings.start_hz as f64 / 1e6,
@@ -1403,7 +1424,7 @@ impl App {
                 }
             }
         }
-        if self.busy {
+        if let Some(settings) = self.active_settings {
             series.push((
                 "Acquiring".into(),
                 self.progress
@@ -1412,12 +1433,23 @@ impl App {
                     .map(|s| {
                         (
                             s.frequency_hz / 1e6,
-                            metric_value(s, self.settings.z0, self.metric),
+                            metric_value(s, settings.z0, self.metric),
                         )
                     })
                     .collect(),
                 Color::White,
             ));
+            if self.metric == 1 {
+                series.push((
+                    "Acquiring X".into(),
+                    self.progress
+                        .iter()
+                        .flatten()
+                        .map(|s| (s.frequency_hz / 1e6, s.x))
+                        .collect(),
+                    Color::LightRed,
+                ));
+            }
         }
         series
     }
@@ -2046,6 +2078,89 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    fn new_sweep_switches_range_before_samples_and_overlays_previous_trace() {
+        let old_settings = SweepSettings {
+            start_hz: 144_000_000,
+            stop_hz: 146_000_000,
+            samples: 3,
+            ..Default::default()
+        };
+        let mut previous = Sweep::new("Previous", old_settings);
+        previous.data = [144e6, 145e6, 146e6]
+            .into_iter()
+            .map(|frequency_hz| Sample {
+                frequency_hz,
+                r: 75.0,
+                x: 10.0,
+            })
+            .collect();
+        for (start_hz, stop_hz, bounds) in [
+            (28_000_000, 30_000_000, [28.0, 30.0]),
+            (144_000_000, 146_000_000, [144.0, 146.0]),
+            (145_000_000, 148_000_000, [145.0, 148.0]),
+        ] {
+            let (commands, mut work) = mpsc::channel(8);
+            let mut app = App::new(Session {
+                sweeps: vec![previous.clone()],
+                ..Default::default()
+            });
+            app.info = Some(DeviceInfo::default());
+            app.connecting = false;
+            app.zoom = 4;
+            app.settings = SweepSettings {
+                start_hz,
+                stop_hz,
+                ..old_settings
+            };
+            app.start(&commands);
+            assert!(matches!(work.try_recv().unwrap(), Work::Acquire(_, _)));
+            assert_eq!(app.zoom, 1);
+            let visible = app.visible_bounds(&previous.data);
+            assert!((visible[0] - bounds[0]).abs() < 1e-12);
+            assert!((visible[1] - bounds[1]).abs() < 1e-12);
+            app.zoom = 2;
+            let zoomed = app.visible_bounds(&previous.data);
+            assert!((zoomed[1] - zoomed[0] - (bounds[1] - bounds[0]) / 2.0).abs() < 1e-12);
+            assert!(zoomed[0] >= bounds[0] && zoomed[1] <= bounds[1]);
+            app.zoom = 1;
+            assert!(app.progress.iter().all(Option::is_none));
+            for index in 0..3 {
+                app.update(
+                    Update::Progress(Progress::Sample {
+                        index,
+                        sample: Sample {
+                            frequency_hz: app.settings.frequency(index),
+                            r: 100.0,
+                            x: 20.0,
+                        },
+                    }),
+                    &commands,
+                );
+            }
+            let series = app.plot_series();
+            assert_eq!(series[0].0, "Previous");
+            assert_eq!(series[0].1.len(), 3);
+            let incoming = series.last().unwrap();
+            assert_eq!(incoming.0, "Acquiring");
+            assert_eq!(incoming.1.len(), 3);
+            assert!(
+                incoming
+                    .1
+                    .iter()
+                    .all(|(x, _)| *x >= visible[0] && *x <= visible[1])
+            );
+            app.metric = 1;
+            assert_eq!(app.plot_series().last().unwrap().0, "Acquiring X");
+            let mut finished = Sweep::new("New", app.settings);
+            finished.data = app.progress.iter().flatten().copied().collect();
+            finished.status = SweepStatus::Complete;
+            app.update(Update::Acquired(finished), &commands);
+            assert!(app.active_settings.is_none());
+            assert_eq!(app.selected, 1);
+        }
+    }
+
     #[test]
     fn vim_list_keys_navigate_without_marking_a_short_reference() {
         let mut app = App::new(Session {

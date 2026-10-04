@@ -102,6 +102,9 @@ Raw sweeps retain their device metadata,
 reference impedance, acquisition timestamp, and complete/partial status. A
 cancelled or failed acquisition keeps the samples already received.
 
+Starting a sweep resets the graph to its full frequency range immediately.
+Incoming samples draw over the previous trace wherever the ranges overlap.
+
 ## Command line
 
 ```sh
