@@ -301,8 +301,8 @@ impl App {
             }
             Update::Connected(info) => {
                 self.log(format!(
-                    "Connected: {} S/N {} firmware {}",
-                    info.name, info.serial, info.firmware
+                    "Ready — press Space to start. {} firmware {}",
+                    info.name, info.firmware
                 ));
                 self.info = Some(info);
                 self.connecting = false;
@@ -1011,19 +1011,8 @@ impl App {
             4 => self.draw_cable(frame, content[1]),
             _ => self.draw_memory(frame, content[1]),
         }
-        let logs = self
-            .logs
-            .iter()
-            .rev()
-            .take(2)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
         frame.render_widget(
-            Paragraph::new(logs)
+            Paragraph::new(self.logs.back().map(String::as_str).unwrap_or_default())
                 .style(Style::new().fg(Color::Yellow))
                 .block(block("Status")),
             regions[3],
