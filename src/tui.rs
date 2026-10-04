@@ -23,6 +23,112 @@ type PlotSeries = (String, Vec<(f64, f64)>, Color);
 
 const TABS: [&str; 6] = ["Live", "Sweeps", "Smith", "TDR", "Cable", "Memory"];
 const COLORS: [Color; 4] = [Color::Cyan, Color::Yellow, Color::Magenta, Color::Green];
+type HelpSection = (&'static str, &'static [(&'static str, &'static str)]);
+const HELP_SECTIONS: &[HelpSection] = &[
+    (
+        "MEASUREMENT",
+        &[
+            ("Space", "Start / stop"),
+            ("p", "Toggle repeat"),
+            ("e", "Edit settings"),
+            ("r", "Reconnect"),
+            ("q / Ctrl+C", "Stop and exit"),
+        ],
+    ),
+    (
+        "NAVIGATION",
+        &[
+            ("Tab / Shift+Tab", "Change view"),
+            ("↑ ↓ / k j", "Select list item"),
+            ("← →", "Move cursor"),
+            ("+ / −", "Zoom at cursor"),
+            ("m", "Change metric"),
+            ("Shift+B", "Choose radio band"),
+        ],
+    ),
+    (
+        "SAVED SWEEPS",
+        &[("b", "Toggle overlay"), ("n", "Rename sweep")],
+    ),
+    (
+        "FILES",
+        &[
+            ("s", "Save JSON session"),
+            ("l", "Load file"),
+            ("x", "Export sweep"),
+        ],
+    ),
+    (
+        "TDR & CABLE",
+        &[
+            ("Shift+← / →", "Move cursor faster"),
+            ("u", "Metres / feet"),
+            ("g", "Strongest reflection"),
+            ("o / Shift+K", "Mark open / short"),
+            ("a / d", "Add / remove cable"),
+            ("v", "Estimate cable VF"),
+        ],
+    ),
+    (
+        "MEMORY & DIALOGS",
+        &[
+            ("f", "Refresh memory"),
+            ("Enter", "Download / apply"),
+            ("Tab / ↑ ↓", "Select input field"),
+            ("Ctrl+U", "Clear input field"),
+            ("Esc", "Cancel dialog"),
+        ],
+    ),
+];
+
+fn help_lines(sections: &[HelpSection]) -> Vec<ratatui::text::Line<'static>> {
+    let mut lines = Vec::new();
+    for (title, bindings) in sections {
+        if !lines.is_empty() {
+            lines.push("".into());
+        }
+        lines.push(ratatui::text::Line::styled(
+            *title,
+            Style::new().fg(Color::Cyan).bold(),
+        ));
+        for (key, action) in *bindings {
+            lines.push(ratatui::text::Line::from(vec![
+                Span::styled(format!("{key:<17}"), Style::new().fg(Color::Yellow)),
+                Span::styled(*action, Style::new().fg(Color::White)),
+            ]));
+        }
+    }
+    lines
+}
+
+fn help_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(112);
+    let height = area.height.saturating_sub(2).min(32);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+fn help_columns(rect: Rect) -> Vec<Vec<ratatui::text::Line<'static>>> {
+    if rect.width >= 80 {
+        vec![
+            help_lines(&HELP_SECTIONS[..3]),
+            help_lines(&HELP_SECTIONS[3..]),
+        ]
+    } else {
+        vec![help_lines(HELP_SECTIONS)]
+    }
+}
+
+fn help_scroll_limit(rect: Rect) -> u16 {
+    let lines = help_columns(rect).iter().map(Vec::len).max().unwrap_or(0);
+    u16::try_from(lines)
+        .unwrap_or(u16::MAX)
+        .saturating_sub(rect.height.saturating_sub(5))
+}
 #[derive(Debug)]
 enum Work {
     Connect,
@@ -181,7 +287,9 @@ enum Modal {
         path: PathBuf,
     },
     Rename(String),
-    Help,
+    Help {
+        scroll: u16,
+    },
 }
 #[expect(
     clippy::struct_excessive_bools,
@@ -646,8 +754,21 @@ impl App {
                     },
                     _ => {}
                 },
-                Modal::Help => {
-                    keep = false;
+                Modal::Help { scroll } => {
+                    let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                    let limit = help_scroll_limit(help_rect(Rect::new(0, 0, width, height)));
+                    *scroll = (*scroll).min(limit);
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            *scroll = scroll.saturating_add(1).min(limit);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                        KeyCode::PageDown => *scroll = scroll.saturating_add(8).min(limit),
+                        KeyCode::PageUp => *scroll = scroll.saturating_sub(8),
+                        KeyCode::Home => *scroll = 0,
+                        KeyCode::End => *scroll = limit,
+                        _ => keep = false,
+                    }
                 }
                 Modal::Settings {
                     fields,
@@ -724,7 +845,7 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return true,
-            KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
             KeyCode::Char('B') => {
                 if self.busy {
                     self.log("Stop the measurement with Space before changing bands.");
@@ -1637,6 +1758,48 @@ impl App {
             bands::range(settings.start_hz, settings.stop_hz)
         )), areas[1]);
     }
+    fn draw_help(frame: &mut Frame, scroll: u16) {
+        let rect = help_rect(frame.area());
+        frame.render_widget(Clear, rect);
+        let border = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::new().fg(Color::Cyan))
+            .title(" Keyboard shortcuts ")
+            .title_style(Style::new().fg(Color::White).bold());
+        let inner = border.inner(rect);
+        frame.render_widget(border, rect);
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+        let text_area = Rect::new(
+            rows[1].x + 1,
+            rows[1].y,
+            rows[1].width.saturating_sub(2),
+            rows[1].height,
+        );
+        let columns = help_columns(rect);
+        let areas = Layout::horizontal(vec![Constraint::Fill(1); columns.len()])
+            .spacing(2)
+            .split(text_area);
+        let limit = help_scroll_limit(rect);
+        for (lines, area) in columns.into_iter().zip(areas.iter()) {
+            frame.render_widget(Paragraph::new(lines).scroll((scroll.min(limit), 0)), *area);
+        }
+        let hint = if limit > 0 {
+            "↑↓ / jk scroll · PgUp/PgDn · Esc close"
+        } else {
+            "Esc / ? to close"
+        };
+        frame.render_widget(
+            Paragraph::new(hint)
+                .centered()
+                .style(Style::new().fg(Color::Gray)),
+            rows[2],
+        );
+    }
     fn draw_modal(frame: &mut Frame, modal: &Modal) {
         let area = frame.area();
         let width = area.width.saturating_sub(4).min(90);
@@ -1653,27 +1816,10 @@ impl App {
                 Self::draw_band_picker(frame, rect, *selected);
                 return;
             }
-            Modal::Help => (
-                "Help",
-                vec![
-                    "Space starts/stops measurements; p toggles repetition.".into(),
-                    "Tab / Shift-Tab change view; ↑↓/jk choose sweeps or memory.".into(),
-                    "←→ move frequency/TDR cursor; +/- zoom; m changes metric.".into(),
-                    "B selects a band (Region 1/2); Enter applies; Space starts.".into(),
-                    "e edits settings; Ctrl-U clears a field; Enter applies.".into(),
-                    "b toggles comparison (up to three overlays); n renames.".into(),
-                    "s saves a JSON session; x exports .csv/.s1p/.json.".into(),
-                    "l loads a file; u switches metres/feet in TDR.".into(),
-                    "Memory: f lists records; Enter downloads selected slot.".into(),
-                    "Cable: o marks open sweep; Shift+K marks short sweep.".into(),
-                    "a adds cable; d removes cable; e edits cable inputs.".into(),
-                    "TDR: g selects strongest reflection; Shift-arrows move faster.".into(),
-                    "Cable: v estimates VF from known length and TDR cursor.".into(),
-                    "r reconnects; q or Ctrl-C stops and exits.".into(),
-                    "Calibration is configured on the analyzer.".into(),
-                    "Esc cancels dialogs. Any key closes this help.".into(),
-                ],
-            ),
+            Modal::Help { scroll } => {
+                Self::draw_help(frame, *scroll);
+                return;
+            }
             Modal::Settings {
                 fields,
                 selected,
@@ -1808,6 +1954,44 @@ pub async fn run(options: ConnectionOptions, demo: bool, load: Option<PathBuf>) 
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn help_keeps_every_shortcut_readable_at_supported_sizes() {
+        for (width, height) in [(120, 40), (80, 24), (50, 16)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let limit = help_scroll_limit(help_rect(Rect::new(0, 0, width, height)));
+            let mut rendered = String::new();
+            for scroll in 0..=limit {
+                terminal
+                    .draw(|frame| App::draw_help(frame, scroll))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let text = buffer
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                assert!(text.contains("close"));
+                rendered.push_str(&text);
+            }
+            for (title, bindings) in HELP_SECTIONS {
+                assert!(
+                    rendered.contains(title),
+                    "missing section {title} at {width}×{height}"
+                );
+                for (key, action) in *bindings {
+                    assert!(
+                        rendered.contains(key),
+                        "missing key {key} at {width}×{height}"
+                    );
+                    assert!(
+                        rendered.contains(action),
+                        "clipped action {action} at {width}×{height}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn swr_scale_preserves_ticks_and_compresses_high_values() {
         let mut expected = 0.0;
@@ -2170,7 +2354,7 @@ mod tests {
                 assert!(text.contains("70 cm"));
                 assert!(text.contains("420–450 MHz"));
             }
-            app.modal = Some(Modal::Help);
+            app.modal = Some(Modal::Help { scroll: 0 });
             terminal.draw(|frame| app.draw(frame)).unwrap();
             app.settings_modal(true);
             terminal.draw(|frame| app.draw(frame)).unwrap();

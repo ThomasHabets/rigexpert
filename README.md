@@ -62,6 +62,9 @@ only when you press Space.
 | ? | Help |
 | q / Ctrl-C | Stop, disconnect, restore the terminal, and exit |
 
+Help groups shortcuts by task, with two columns on wide terminals. On smaller
+terminals, use Up/Down or k/j and Page Up/Down to scroll; Esc closes help.
+
 Press **Shift+B**, use arrows or Page Up/Down to choose a band, and press Enter
 to set its sweep range. This switches to Sweeps and keeps your sample count and
 reference impedance; **Space** starts the measurement. Esc cancels the picker.
