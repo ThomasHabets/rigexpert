@@ -46,20 +46,45 @@ enum Update {
 async fn worker(
     options: ConnectionOptions,
     demo: bool,
-    mut commands: mpsc::Receiver<Work>,
+    commands: mpsc::Receiver<Work>,
     events: mpsc::Sender<Update>,
 ) {
+    worker_with_connector(commands, events, Duration::from_secs(5), move || {
+        let options = options.clone();
+        async move {
+            if demo {
+                Analyzer::demo().await
+            } else {
+                Analyzer::connect(&options).await
+            }
+        }
+    })
+    .await;
+}
+async fn worker_with_connector<F, Fut>(
+    mut commands: mpsc::Receiver<Work>,
+    events: mpsc::Sender<Update>,
+    retry_delay: Duration,
+    mut connect: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Analyzer>>,
+{
+    let mut reconnect_at = None;
     let mut analyzer: Option<Analyzer> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let command = tokio::select! {
+            biased;
             command=commands.recv()=>match command { Some(c)=>c,None=>break },
+            ()=async { tokio::time::sleep_until(reconnect_at.unwrap()).await },if reconnect_at.is_some()=>Work::Connect,
             _=heartbeat.tick(),if analyzer.is_some()=> {
                 let a=analyzer.as_mut().unwrap();
                 if let Err(e)=a.ping().await {
                     let _=a.disconnect().await; analyzer=None;
-                    let _=events.send(Update::Disconnected(format!("Connection lost: {e}. Press r to reconnect."))).await;
+                    reconnect_at=Some(tokio::time::Instant::now()+retry_delay);
+                    let _=events.send(Update::Disconnected(format!("Connection lost: {e}. Retrying in {}s; r retries now.",retry_delay.as_secs()))).await;
                 }
                 continue;
             }
@@ -68,23 +93,28 @@ async fn worker(
             break;
         }
         if matches!(command, Work::Connect) {
+            reconnect_at = None;
             if let Some(mut a) = analyzer.take() {
                 let _ = a.disconnect().await;
             }
             let _ = events.send(Update::Connecting).await;
-            match if demo {
-                Analyzer::demo().await
-            } else {
-                Analyzer::connect(&options).await
-            } {
+            match connect().await {
                 Ok(a) => {
                     let _ = events.send(Update::Connected(a.info().clone())).await;
                     analyzer = Some(a);
                 }
                 Err(e) => {
+                    // Invalid inputs need correction rather than repeated attempts.
+                    let retry = !matches!(e, Error::Invalid(_));
+                    let recovery = if retry {
+                        reconnect_at = Some(tokio::time::Instant::now() + retry_delay);
+                        format!("Retrying in {}s; r retries now.", retry_delay.as_secs())
+                    } else {
+                        "Press r to retry after correcting the settings.".into()
+                    };
                     let _ = events
                         .send(Update::Failed(format!(
-                            "{e}. Press r to retry; --demo works without Bluetooth."
+                            "{e}. {recovery} --demo works without Bluetooth."
                         )))
                         .await;
                 }
@@ -886,10 +916,28 @@ fn number(v: f64) -> String {
         format!("{v:.3}")
     }
 }
+const SWR_TICKS: [f64; 7] = [1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 10.0];
+
+/// Compress SWR into six equal chart intervals, with extra detail near 1:1.
+fn swr_plot_value(swr: f64) -> f64 {
+    if swr.is_nan() {
+        return f64::NAN;
+    }
+    let swr = swr.clamp(1.0, 10.0);
+    let mut position = 0.0;
+    for ticks in SWR_TICKS.windows(2) {
+        if swr <= ticks[1] {
+            return position + (swr - ticks[0]) / (ticks[1] - ticks[0]);
+        }
+        position += 1.0;
+    }
+    position
+}
+
 fn metric_value(s: &Sample, z0: f64, metric: usize) -> f64 {
     match analysis::metrics(s, z0) {
         Ok(m) => match metric {
-            0 => m.swr.min(20.0),
+            0 => swr_plot_value(m.swr),
             1 => s.r,
             2 => m.return_loss_db.min(100.0),
             3 => m.magnitude,
@@ -906,21 +954,19 @@ fn chart(
     xbounds: [f64; 2],
     ylabel: &str,
 ) {
-    let ys: Vec<_> = series
-        .iter()
-        .flat_map(|(_, points, _)| points.iter())
-        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= xbounds[0] && *x <= xbounds[1])
-        .map(|(_, y)| *y)
-        .collect();
-    let mut ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
-    let mut ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !ymin.is_finite() || !ymax.is_finite() {
-        ymin = 0.0;
-        ymax = 1.0;
-    }
-    let pad = ((ymax - ymin) * 0.1).max(0.1);
-    ymin -= pad;
-    ymax += pad;
+    let y_axis = if ylabel == "SWR" {
+        // Axis labels are evenly spaced, just like the transformed tick positions.
+        let labels = if area.height >= 16 {
+            vec!["1", "1.2", "1.5", "2", "3", "5", "10"]
+        } else if area.height >= 10 {
+            vec!["1", "1.5", "3", "10"]
+        } else {
+            vec!["1", "10"]
+        };
+        Axis::default().bounds([0.0, 6.0]).labels(labels)
+    } else {
+        auto_y_axis(series, xbounds)
+    };
     let datasets = series
         .iter()
         .map(|(name, points, color)| {
@@ -942,13 +988,32 @@ fn chart(
                 .labels([format!("{:.2}", xbounds[0]), format!("{:.2}", xbounds[1])]),
         )
         .y_axis(
-            Axis::default()
+            y_axis
                 .title(ylabel.to_string())
-                .style(Style::new().fg(Color::Gray))
-                .bounds([ymin, ymax])
-                .labels([number(ymin), number(ymax)]),
+                .style(Style::new().fg(Color::Gray)),
         );
     frame.render_widget(chart, area);
+}
+
+fn auto_y_axis(series: &[PlotSeries], xbounds: [f64; 2]) -> Axis<'static> {
+    let ys: Vec<_> = series
+        .iter()
+        .flat_map(|(_, points, _)| points.iter())
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= xbounds[0] && *x <= xbounds[1])
+        .map(|(_, y)| *y)
+        .collect();
+    let mut ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let mut ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !ymin.is_finite() || !ymax.is_finite() {
+        ymin = 0.0;
+        ymax = 1.0;
+    }
+    let pad = ((ymax - ymin) * 0.1).max(0.1);
+    ymin -= pad;
+    ymax += pad;
+    Axis::default()
+        .bounds([ymin, ymax])
+        .labels([number(ymin), number(ymax)])
 }
 impl App {
     #[expect(
@@ -1210,7 +1275,7 @@ impl App {
     fn draw_sweeps(&self, frame: &mut Frame, area: Rect) {
         let regions = Layout::vertical([Constraint::Min(3), Constraint::Length(4)]).split(area);
         let labels = [
-            "SWR (display capped at 20)",
+            "SWR (fixed 1–10, compressed scale)",
             "R / X",
             "Return loss (dB)",
             "|Z| (ohm)",
@@ -1224,7 +1289,11 @@ impl App {
             labels[self.metric],
             &self.plot_series(),
             bounds,
-            labels[self.metric],
+            if self.metric == 0 {
+                "SWR"
+            } else {
+                labels[self.metric]
+            },
         );
         frame.render_widget(
             Paragraph::new(self.sample_readout())
@@ -1707,6 +1776,56 @@ pub async fn run(options: ConnectionOptions, demo: bool, load: Option<PathBuf>) 
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn swr_scale_preserves_ticks_and_compresses_high_values() {
+        let mut expected = 0.0;
+        for swr in SWR_TICKS {
+            assert!((swr_plot_value(swr) - expected).abs() < 1e-12);
+            expected += 1.0;
+        }
+        for (swr, expected) in [(1.1, 0.5), (1.75, 2.5), (7.5, 5.5)] {
+            assert!((swr_plot_value(swr) - expected).abs() < 1e-12);
+        }
+        for swr in [10.0, 20.0, f64::INFINITY] {
+            assert!((swr_plot_value(swr) - 6.0).abs() < 1e-12);
+        }
+        assert!(swr_plot_value(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn swr_axis_stays_fixed_for_empty_and_extreme_traces() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        for points in [vec![], vec![(1.0, 0.0), (2.0, 6.0)], vec![(1.5, 0.5)]] {
+            terminal
+                .draw(|frame| {
+                    chart(
+                        frame,
+                        frame.area(),
+                        "SWR",
+                        &[("Trace".into(), points.clone(), Color::Cyan)],
+                        [1.0, 2.0],
+                        "SWR",
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for label in ["1", "1.2", "1.5", "2", "3", "5", "10"] {
+                assert!(
+                    buffer.content().chunks(80).any(|row| {
+                        let axis = row
+                            .iter()
+                            .skip(1)
+                            .take(3)
+                            .map(ratatui::buffer::Cell::symbol)
+                            .collect::<String>();
+                        axis.trim() == label
+                    }),
+                    "missing SWR tick {label}"
+                );
+            }
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1908,6 +2027,130 @@ mod tests {
         assert!(app.modal.is_none());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "original");
     }
+    struct DisconnectOnPing(rigexpert::transport::DemoTransport);
+    #[async_trait::async_trait]
+    impl rigexpert::Transport for DisconnectOnPing {
+        fn packed(&self) -> bool {
+            self.0.packed()
+        }
+        fn address(&self) -> String {
+            self.0.address()
+        }
+        async fn send(&mut self, packet: &rigexpert::protocol::Packet) -> Result<()> {
+            if packet[0] == rigexpert::protocol::PING {
+                return Err(Error::Disconnected);
+            }
+            self.0.send(packet).await
+        }
+        async fn receive(&mut self) -> Result<Vec<u8>> {
+            self.0.receive().await
+        }
+        async fn acknowledge(&mut self, crc: u8) -> Result<()> {
+            self.0.acknowledge(crc).await
+        }
+        async fn disconnect(&mut self) -> Result<()> {
+            self.0.disconnect().await
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_reconnects_after_the_link_drops() {
+        let (commands, rx) = mpsc::channel(8);
+        let (events, mut updates) = mpsc::channel(64);
+        let mut attempts = 0;
+        let task = tokio::spawn(worker_with_connector(
+            rx,
+            events,
+            Duration::from_millis(10),
+            move || {
+                attempts += 1;
+                let attempt = attempts;
+                async move {
+                    if attempt == 1 {
+                        Analyzer::with_transport(Box::new(DisconnectOnPing(
+                            rigexpert::transport::DemoTransport::new(),
+                        )))
+                        .await
+                    } else {
+                        Analyzer::demo().await
+                    }
+                }
+            },
+        ));
+        commands.send(Work::Connect).await.unwrap();
+        assert!(matches!(updates.recv().await, Some(Update::Connecting)));
+        assert!(matches!(updates.recv().await, Some(Update::Connected(_))));
+        assert!(matches!(
+            updates.recv().await,
+            Some(Update::Disconnected(_))
+        ));
+        assert!(matches!(updates.recv().await, Some(Update::Connecting)));
+        assert!(matches!(updates.recv().await, Some(Update::Connected(_))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), updates.recv())
+                .await
+                .is_err()
+        );
+        commands.send(Work::Shutdown).await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_recovers_a_failed_connection_without_resuming_measurement() {
+        let (commands, rx) = mpsc::channel(8);
+        let (events, mut updates) = mpsc::channel(64);
+        let mut attempts = 0;
+        let task = tokio::spawn(worker_with_connector(
+            rx,
+            events,
+            Duration::from_millis(10),
+            move || {
+                attempts += 1;
+                let attempt = attempts;
+                async move {
+                    if attempt == 1 {
+                        Err(Error::Disconnected)
+                    } else {
+                        Analyzer::demo().await
+                    }
+                }
+            },
+        ));
+        commands.send(Work::Connect).await.unwrap();
+        assert!(matches!(updates.recv().await, Some(Update::Connecting)));
+        assert!(matches!(updates.recv().await, Some(Update::Failed(_))));
+        assert!(matches!(updates.recv().await, Some(Update::Connecting)));
+        assert!(matches!(updates.recv().await, Some(Update::Connected(_))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), updates.recv())
+                .await
+                .is_err()
+        );
+        commands.send(Work::Shutdown).await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_cancels_a_pending_reconnect() {
+        let (commands, rx) = mpsc::channel(8);
+        let (events, mut updates) = mpsc::channel(64);
+        let task = tokio::spawn(worker_with_connector(
+            rx,
+            events,
+            Duration::from_secs(5),
+            || async { Err(Error::Disconnected) },
+        ));
+        commands.send(Work::Connect).await.unwrap();
+        assert!(matches!(updates.recv().await, Some(Update::Connecting)));
+        assert!(matches!(updates.recv().await, Some(Update::Failed(_))));
+        commands.send(Work::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(updates.recv().await, Some(Update::Shutdown)));
+    }
+
     #[tokio::test]
     async fn worker_connects_streams_and_shuts_down() {
         let (commands, rx) = mpsc::channel(8);

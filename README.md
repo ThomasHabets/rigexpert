@@ -83,7 +83,7 @@ Hz. Overwriting an existing file requires `y` confirmation. File operations run
 outside the device task. For best visibility use a terminal of at least 80×24;
 50×16 is the minimum layout.
 
-The default sweep is **144–148 MHz, 201 samples, 50 Ω**. A sample count includes
+The default sweep is **144–146 MHz, 201 samples, 50 Ω**. A sample count includes
 both endpoints; the device command receives one fewer interval. BLE frequencies
 must be whole kHz and the span an even number of kHz so the center frequency is
 represented exactly. Limits come from the device and are bounded by the
@@ -91,8 +91,11 @@ AA-650's 100 kHz–650 MHz rating. Live mode acquires two readings at the same
 frequency with zero span. Repeated live acquisitions replace the previous live
 reading; ordinary sweeps remain in the session until another file is loaded.
 
-SWR charts cap the display at 20 and return loss at 100 dB; cursor readouts show
-actual values, including infinity. Raw sweeps retain their device metadata,
+SWR charts use a fixed, compressed 1–10 scale with marks at 1, 1.2, 1.5, 2,
+3, 5, and 10, giving more detail near a good match. Values above 10 are clipped
+at the top; smaller terminals show fewer labels on the same scale. Return loss
+is capped at 100 dB. Cursor readouts show actual values, including infinity.
+Raw sweeps retain their device metadata,
 reference impedance, acquisition timestamp, and complete/partial status. A
 cancelled or failed acquisition keeps the samples already received.
 
@@ -117,7 +120,8 @@ rigexpert --demo memory download 1 --output cable-open.json
 CLI. Repetition with a file requires `--overwrite`; each completed sweep replaces
 that file. Incomplete acquisitions are exported with status metadata and produce
 a nonzero exit status. CSV on stdout is measurement data only; use file export to
-retain metadata. `--timeout` controls discovery/connection, default 15 seconds.
+retain metadata. `--timeout` bounds discovery, connection, and identification
+across up to three attempts, default 15 seconds.
 A sweep has a 3-second inactivity timeout and a 120-second overall deadline.
 
 ## Analysis workflows
@@ -233,7 +237,44 @@ leave that acquisition incomplete.
 The client scans using LE transport and the target address, without requiring
 service UUIDs in advertisements. It reports which connection stage timed out
 and disconnects failed attempts before returning, so retries do not leave the
-analyzer occupied.
+analyzer occupied. The TUI automatically retries a lost or failed connection
+after five seconds; `r` retries immediately. Reconnecting leaves measurements
+stopped and reports Ready when identification succeeds.
+
+A link-level `Connection Timeout (0x08)` in `btmon` differs from an application
+command timeout. On the development adapter, the initial supervision timeout
+was only 420 ms. A longer supervision timeout may help tolerate brief radio
+interruptions, but it does not fix weak signal or interference. Linux caches
+connection parameters per device, so changing the adapter default can leave an
+existing device's timeout unchanged. Verify the actual timeout in a fresh
+`LE Enhanced Connection Complete` event. The kernel's
+[connection setup](https://github.com/torvalds/linux/blob/master/net/bluetooth/hci_sync.c)
+uses cached device parameters before adapter defaults; a privileged user can
+update a specific peer with BlueZ's
+[Load Connection Parameters command](https://github.com/bluez/bluez/blob/5.82/doc/mgmt-api.txt).
+For this analyzer on hci0, the helper sets a four-second timeout for the peer
+without changing other devices or restarting Bluetooth:
+
+```sh
+sudo python3 extra/set-ble-parameters.py
+```
+
+It needs root for the management socket. The setting is temporary; reapply it
+before connecting if BlueZ has discarded the unpaired device's cached settings,
+or after rebooting or resetting the adapter. It retains the 30–50 ms connection
+interval and zero peripheral latency.
+
+For a persistent adapter default, set the following in `/etc/bluetooth/main.conf`:
+
+```ini
+[LE]
+ConnectionSupervisionTimeout = 400
+```
+
+The value uses 10 ms units, so 400 means four seconds. This applies to new LE
+connections on the adapter, including devices other than the analyzer. BlueZ
+loads it at startup; cached per-device parameters can still override it. Keep a
+backup of the original configuration before changing it.
 
 Try these commands from your normal account with the analyzer powered on:
 

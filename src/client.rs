@@ -3,7 +3,7 @@ use crate::{
     protocol::{self, Packet},
     transport::{self, ConnectionOptions, Transport},
 };
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -14,12 +14,47 @@ pub struct Analyzer {
     pub idle_timeout: Duration,
     pub operation_timeout: Duration,
 }
+// Retry the entire connection, including identity exchange. Split the remaining
+// budget between attempts so a stalled first attempt cannot consume every retry.
+async fn retry_connection<T, F, Fut>(budget: Duration, mut connect: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let deadline = Instant::now() + budget;
+    for attempts_left in (1..=3).rev() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let outcome = timeout(remaining / attempts_left, connect())
+            .await
+            .unwrap_or(Err(Error::Timeout(
+                "Bluetooth connection and identification",
+            )));
+        match outcome {
+            Ok(connected) => return Ok(connected),
+            Err(error) if attempts_left == 1 || matches!(error, Error::Invalid(_)) => {
+                return Err(error);
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(
+            Duration::from_millis(250)
+                .min(deadline.saturating_duration_since(Instant::now()) / (attempts_left * 2)),
+        )
+        .await;
+    }
+    unreachable!("final connection attempt returns its result")
+}
+
 impl Analyzer {
     ///
     /// # Errors
     /// Returns an error if Bluetooth connection, service discovery, or analyzer identification fails.
+    /// Transient failures get up to three attempts within `options.timeout`.
     pub async fn connect(options: &ConnectionOptions) -> Result<Self> {
-        Self::with_transport(Box::new(transport::BleTransport::connect(options).await?)).await
+        retry_connection(options.timeout, || async {
+            Self::with_transport(Box::new(transport::BleTransport::connect(options).await?)).await
+        })
+        .await
     }
     ///
     /// # Errors
@@ -309,5 +344,56 @@ impl Analyzer {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_connection_and_identification_failures() {
+        let mut attempts = 0;
+        let result = retry_connection(Duration::from_secs(2), || {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                match attempt {
+                    1 => Err(Error::Disconnected),
+                    2 => Err(Error::Timeout("device information")),
+                    _ => Ok(42),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_invalid_input() {
+        let mut attempts = 0;
+        let result: Result<()> = retry_connection(Duration::from_secs(2), || {
+            attempts += 1;
+            async { Err(Error::Invalid("invalid Bluetooth address".into())) }
+        })
+        .await;
+        assert!(matches!(result, Err(Error::Invalid(_))));
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_connections_leave_time_for_other_attempts() {
+        let attempts = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let result: Result<()> = retry_connection(Duration::from_millis(90), || async {
+            attempts.set(attempts.get() + 1);
+            std::future::pending().await
+        })
+        .await;
+        assert!(matches!(result, Err(Error::Timeout(_))));
+        assert_eq!(attempts.get(), 3);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

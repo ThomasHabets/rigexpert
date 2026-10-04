@@ -24,8 +24,8 @@ use uuid::Uuid;
 pub(crate) struct DirectTransport {
     socket: Arc<SeqPacket>,
     reader: JoinHandle<()>,
-    responses: mpsc::UnboundedReceiver<Vec<u8>>,
-    notifications: mpsc::UnboundedReceiver<(u16, Vec<u8>)>,
+    responses: mpsc::UnboundedReceiver<Result<Vec<u8>>>,
+    notifications: mpsc::UnboundedReceiver<Result<(u16, Vec<u8>)>>,
     address: String,
     read_handle: u16,
     write_handle: u16,
@@ -105,6 +105,47 @@ fn peer_reply(packet: &[u8]) -> Option<Vec<u8>> {
         _ => None,
     }
 }
+fn spawn_reader(
+    reader_socket: Arc<SeqPacket>,
+    response_tx: mpsc::UnboundedSender<Result<Vec<u8>>>,
+    notification_tx: mpsc::UnboundedSender<Result<(u16, Vec<u8>)>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 517];
+        let failure = loop {
+            let count = match reader_socket.recv(&mut buffer).await {
+                Ok(0) => break "ATT peer closed the connection".to_owned(),
+                Err(error) => break format!("ATT receive: {error}"),
+                Ok(count) => count,
+            };
+            let packet = &buffer[..count];
+            if let Some(reply) = peer_reply(packet)
+                && let Err(error) = reader_socket.send(&reply).await
+            {
+                break format!("ATT peer response: {error}");
+            }
+            match packet[0] {
+                0x1b | 0x1d if packet.len() >= 3 => {
+                    let handle = u16::from_le_bytes([packet[1], packet[2]]);
+                    if notification_tx
+                        .send(Ok((handle, packet[3..].to_vec())))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                0x01 | 0x03 | 0x05 | 0x07 | 0x09 | 0x0b | 0x0d | 0x11 | 0x13 | 0x17 | 0x19
+                    if response_tx.send(Ok(packet.to_vec())).is_err() =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        };
+        let _ = response_tx.send(Err(Error::Bluetooth(failure.clone())));
+        let _ = notification_tx.send(Err(Error::Bluetooth(failure)));
+    })
+}
 impl DirectTransport {
     pub(crate) async fn connect(options: &ConnectionOptions) -> Result<Self> {
         timeout(options.timeout, Self::connect_inner(options))
@@ -164,42 +205,13 @@ impl DirectTransport {
             unsafe { BorrowedFd::borrow_raw(socket.as_raw_fd()) }.try_clone_to_owned()?;
         let completion = tokio::io::unix::AsyncFd::new(descriptor)?;
         let _ready = completion.writable().await?;
+        socket
+            .peer_addr()
+            .map_err(|error| Error::Bluetooth(format!("ATT connection completion: {error}")))?;
         drop(discovery);
         let (response_tx, responses) = mpsc::unbounded_channel();
         let (notification_tx, notifications) = mpsc::unbounded_channel();
-        let reader_socket = socket.clone();
-        let reader = tokio::spawn(async move {
-            let mut buffer = [0u8; 517];
-            loop {
-                let count = match reader_socket.recv(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => count,
-                };
-                let packet = &buffer[..count];
-                if let Some(reply) = peer_reply(packet)
-                    && reader_socket.send(&reply).await.is_err()
-                {
-                    break;
-                }
-                match packet[0] {
-                    0x1b | 0x1d if packet.len() >= 3 => {
-                        let handle = u16::from_le_bytes([packet[1], packet[2]]);
-                        if notification_tx
-                            .send((handle, packet[3..].to_vec()))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    0x01 | 0x03 | 0x05 | 0x07 | 0x09 | 0x0b | 0x0d | 0x11 | 0x13 | 0x17 | 0x19
-                        if response_tx.send(packet.to_vec()).is_err() =>
-                    {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        });
+        let reader = spawn_reader(socket.clone(), response_tx, notification_tx);
         let mut transport = Self {
             socket,
             reader,
@@ -221,7 +233,7 @@ impl DirectTransport {
                 .send(packet)
                 .await
                 .map_err(|e| Error::Bluetooth(format!("ATT send: {e}")))?;
-            self.responses.recv().await.ok_or(Error::Disconnected)
+            self.responses.recv().await.ok_or(Error::Disconnected)?
         })
         .await
         .map_err(|_| Error::Timeout("ATT response"))?
@@ -403,7 +415,11 @@ impl Transport for DirectTransport {
     }
     async fn receive(&mut self) -> Result<Vec<u8>> {
         loop {
-            let (handle, data) = self.notifications.recv().await.ok_or(Error::Disconnected)?;
+            let (handle, data) = self
+                .notifications
+                .recv()
+                .await
+                .ok_or(Error::Disconnected)??;
             if handle == self.read_handle {
                 return Ok(data);
             }

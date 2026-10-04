@@ -87,7 +87,7 @@ struct Output {
 struct SettingsArgs {
     #[arg(long,default_value="144MHz",value_parser=parse_frequency)]
     start: String,
-    #[arg(long,default_value="148MHz",value_parser=parse_frequency)]
+    #[arg(long,default_value="146MHz",value_parser=parse_frequency)]
     stop: String,
     #[arg(long,default_value="201",value_parser=clap::value_parser!(usize))]
     samples: usize,

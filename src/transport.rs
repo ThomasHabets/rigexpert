@@ -67,6 +67,7 @@ impl BleTransport {
             Ok(transport) => Ok(Self {
                 inner: Box::new(transport),
             }),
+            Err(error @ Error::Invalid(_)) => Err(error),
             Err(direct_error) => {
                 let bluez = BluezTransport::connect(options).await
                     .map_err(|bluez_error| Error::Bluetooth(format!(
