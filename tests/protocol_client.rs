@@ -17,7 +17,7 @@ fn crc_and_command_wire_layout() {
     assert_eq!(
         &p[..13],
         &[
-            0x7f, 0x50, 0x3a, 0x02, 0x00, 0xa0, 0x0f, 0, 0, 0xc8, 0, 0, 0
+            0x7f, 0x68, 0x36, 0x02, 0x00, 0xd0, 0x07, 0, 0, 0xc8, 0, 0, 0
         ]
     );
     assert!(protocol::check(&p).is_ok());
@@ -41,7 +41,7 @@ fn both_formats_and_padding() {
         ..Default::default()
     };
     let mut p = protocol::command(protocol::FRX);
-    p[1..9].copy_from_slice(&146_000_000u64.to_le_bytes());
+    p[1..9].copy_from_slice(&145_000_000u64.to_le_bytes());
     p[9..13].copy_from_slice(&50f32.to_le_bytes());
     p[13..17].copy_from_slice(&(-12.5f32).to_le_bytes());
     let points = protocol::samples(&protocol::seal(p), false, &settings).unwrap();
@@ -50,7 +50,7 @@ fn both_formats_and_padding() {
         vec![(
             1,
             Sample {
-                frequency_hz: 146_000_000.0,
+                frequency_hz: 145_000_000.0,
                 r: 50.0,
                 x: -12.5
             }
@@ -118,7 +118,7 @@ async fn demo_round_trip_and_memory() {
     assert_eq!(sweep.status, SweepStatus::Complete);
     assert_eq!(count, 11);
     assert_eq!(sweep.data[0].frequency_hz, 144_000_000.0);
-    assert_eq!(sweep.data[10].frequency_hz, 148_000_000.0);
+    assert_eq!(sweep.data[10].frequency_hz, 146_000_000.0);
     let records = a.records(50.0, &cancel).await.unwrap();
     assert_eq!(records.len(), 3);
     assert_eq!(records[1].name, "Cable open");

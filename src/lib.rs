@@ -77,7 +77,7 @@ impl Default for SweepSettings {
     fn default() -> Self {
         Self {
             start_hz: 144_000_000,
-            stop_hz: 148_000_000,
+            stop_hz: 146_000_000,
             samples: 201,
             z0: 50.0,
         }
