@@ -1948,16 +1948,27 @@ pub async fn run(options: ConnectionOptions, demo: bool, load: Option<PathBuf>) 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let outcome = async {
+        let mut redraw = true;
         loop {
             while let Ok(update) = updates.try_recv() {
                 app.update(update, &commands);
+                redraw = true;
             }
-            terminal.draw(|frame| app.draw(frame))?;
-            if event::poll(Duration::from_millis(20))?
-                && let Event::Key(key) = event::read()?
-                && app.key(key, &commands, &events)
-            {
-                break;
+            if redraw {
+                terminal.draw(|frame| app.draw(frame))?;
+                redraw = false;
+            }
+            if event::poll(Duration::from_millis(20))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if app.key(key, &commands, &events) {
+                            break;
+                        }
+                        redraw |= key.kind != KeyEventKind::Release;
+                    }
+                    Event::Resize(_, _) => redraw = true,
+                    _ => {}
+                }
             }
             tokio::select! {
                 _ = interrupt.recv() => break,
