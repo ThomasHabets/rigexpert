@@ -17,7 +17,7 @@ rustfft = "6.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 

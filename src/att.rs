@@ -203,7 +203,10 @@ impl DirectTransport {
         // immediate duplication; the duplicate has independent ownership.
         let descriptor =
             unsafe { BorrowedFd::borrow_raw(socket.as_raw_fd()) }.try_clone_to_owned()?;
-        let completion = tokio::io::unix::AsyncFd::new(descriptor)?;
+        // SAFETY: AsyncFd owns the duplicated descriptor, which stays open and
+        // unchanged until completion is dropped; we never replace or close it.
+        let completion = unsafe { tokio::io::unix::AsyncFd::register(descriptor) }
+            .map_err(std::io::Error::from)?;
         let _ready = completion.writable().await?;
         socket
             .peer_addr()
